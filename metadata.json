@@ -1,0 +1,8 @@
+{
+  "name": "SiagaBantu - Hybrid Disaster Relief",
+  "description": "Platform logistik bantuan bencana transparan berbasis blockchain dan QR tracking.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": []
+}

@@ -1,0 +1,66 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Stores user roles and wallet addresses",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["ADMIN", "RELAWAN", "GUDANG", "DONATUR"] },
+        "walletAddress": { "type": "string" }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "Goods": {
+      "title": "Logistic Goods",
+      "description": "Inventory items in the logistics chain",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "quantity": { "type": "number" },
+        "unit": { "type": "string" },
+        "status": { "type": "string", "enum": ["DI GUDANG", "DIAMBIL", "DIKIRIM", "SAMPAI"] },
+        "warehouseId": { "type": "string" },
+        "volunteerId": { "type": "string" },
+        "donorId": { "type": "string" },
+        "donorName": { "type": "string" },
+        "qrcode": { "type": "string" },
+        "lastTxHash": { "type": "string" },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["name", "status", "qrcode", "createdAt"]
+    },
+    "Donation": {
+      "title": "Donation Record",
+      "description": "Transparent donation records synced with blockchain",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "donorId": { "type": "string" },
+        "amount": { "type": "number" },
+        "txHash": { "type": "string" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["donorId", "amount", "txHash", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Application user data"
+    },
+    "/goods/{goodId}": {
+      "schema": "Goods",
+      "description": "Inventory and shipment items"
+    },
+    "/donations/{donationId}": {
+      "schema": "Donation",
+      "description": "Financial donation records"
+    }
+  }
+}

@@ -1,0 +1,64 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // -------------------------------------------------------------
+    // Helper Functions (The Primitives)
+    // -------------------------------------------------------------
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function getUserRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function hasRole(role) {
+      return isSignedIn() && getUserRole() == role;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128;
+    }
+
+    // -------------------------------------------------------------
+    // Rules for Collections
+    // -------------------------------------------------------------
+
+    // Users: Profile read/write
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isOwner(userId);
+      allow update: if isSignedIn() && isOwner(userId) && 
+                    // Prevent users from changing their own role after creation
+                    (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']));
+    }
+
+    // Goods: Any user can read, but specific roles can write
+    match /goods/{goodId} {
+      allow read: if isSignedIn();
+      allow create: if hasRole('GUDANG') || hasRole('ADMIN') || hasRole('DONATUR');
+      allow update: if isSignedIn() && (
+        hasRole('GUDANG') || hasRole('ADMIN') || 
+        (hasRole('RELAWAN') && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'volunteerId', 'updatedAt', 'lastTxHash']))
+      );
+      allow delete: if hasRole('ADMIN');
+    }
+
+    // Donations: Public read, Donor write
+    match /donations/{donationId} {
+      allow read: if true;
+      allow create: if isSignedIn(); // Donors create their own donation records
+      allow update: if false; // Donations are immutable
+      allow delete: if false;
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
