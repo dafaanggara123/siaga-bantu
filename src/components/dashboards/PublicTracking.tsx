@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { collection, query, orderBy, onSnapshot, where, getDocs } from 'firebase/firestore';
 import { db } from '../../firebase';
-import { Goods, LogisticStatus, BlockchainNetwork } from '../../types';
+import { Goods, LogisticStatus, BlockchainNetwork, FundUsage } from '../../types';
 import { 
   Search, 
   Package, 
@@ -13,7 +13,11 @@ import {
   Truck,
   Warehouse,
   ArrowRight,
-  Database
+  Database,
+  CreditCard,
+  Send,
+  Calendar,
+  DollarSign
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format } from 'date-fns';
@@ -24,18 +28,56 @@ export default function PublicTracking() {
   const [searchTerm, setSearchTerm] = useState('');
   const [searchResult, setSearchResult] = useState<Goods | null>(null);
   const [latestGoods, setLatestGoods] = useState<Goods[]>([]);
+  const [fundUsage, setFundUsage] = useState<FundUsage[]>([]);
   const [searching, setSearching] = useState(false);
 
   useEffect(() => {
     // Show last 10 activities publicly
-    const q = query(collection(db, 'goods'), orderBy('updatedAt', 'desc'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    const loadData = () => {
+      const savedLogistics = localStorage.getItem("logistics");
+      const localLogistics: Goods[] = savedLogistics ? JSON.parse(savedLogistics) : [];
+      
+      setLatestGoods(localLogistics.slice(0, 10));
+    };
+
+    loadData();
+
+    // Still listen to Firestore as well for global data
+    const unsubscribe = onSnapshot(query(collection(db, 'goods'), orderBy('updatedAt', 'desc')), (snapshot) => {
       const items: Goods[] = [];
       snapshot.forEach((doc) => items.push({ id: doc.id, ...doc.data() } as Goods));
-      setLatestGoods(items.slice(0, 10));
+      
+      const savedLogistics = localStorage.getItem("logistics");
+      const localLogistics: Goods[] = savedLogistics ? JSON.parse(savedLogistics) : [];
+
+      // Combine with local logistics for total view in this browser. Prioritize local if IDs match
+      const combined = [...localLogistics];
+      items.forEach(item => {
+        if (!combined.find(l => l.id === item.id)) {
+          combined.push(item);
+        }
+      });
+
+      combined.sort((a,b) => {
+        const timeA = new Date(a.updatedAt || 0).getTime();
+        const timeB = new Date(b.updatedAt || 0).getTime();
+        return timeB - timeA;
+      });
+      
+      setLatestGoods(combined.slice(0, 10));
     });
 
-    return () => unsubscribe();
+    const fundQ = query(collection(db, 'fundUsage'), orderBy('createdAt', 'desc'));
+    const unsubscribeFunds = onSnapshot(fundQ, (snapshot) => {
+      const items: FundUsage[] = [];
+      snapshot.forEach((doc) => items.push({ id: doc.id, ...doc.data() } as FundUsage));
+      setFundUsage(items);
+    });
+
+    return () => {
+      unsubscribe();
+      unsubscribeFunds();
+    };
   }, []);
 
   const handleSearch = async (e: React.FormEvent) => {
@@ -43,7 +85,21 @@ export default function PublicTracking() {
     if (!searchTerm) return;
     
     setSearching(true);
-    const q = query(collection(db, 'goods'), where('qrcode', '==', searchTerm.trim().toUpperCase()));
+    const searchKey = searchTerm.trim().toUpperCase();
+
+    // Check localStorage first
+    const savedLogistics = localStorage.getItem("logistics");
+    const localLogistics = savedLogistics ? JSON.parse(savedLogistics) : [];
+    const localMatch = localLogistics.find((g: any) => g.qrcode === searchKey || g.id === searchKey || g.uid === searchKey);
+
+    if (localMatch) {
+      setSearchResult(localMatch);
+      setSearching(false);
+      return;
+    }
+
+    // Then check Firestore
+    const q = query(collection(db, 'goods'), where('qrcode', '==', searchKey));
     const snapshot = await getDocs(q);
     
     if (!snapshot.empty) {
@@ -54,9 +110,14 @@ export default function PublicTracking() {
     setSearching(false);
   };
 
-  const getStepStatus = (currentStatus: LogisticStatus, targetStatus: LogisticStatus) => {
-    const order = [LogisticStatus.IN_GUDANG, LogisticStatus.PICKED_UP, LogisticStatus.IN_TRANSIT, LogisticStatus.DELIVERED];
-    const currentIndex = order.indexOf(currentStatus);
+  const getStepStatus = (currentStatus: LogisticStatus | string, targetStatus: LogisticStatus) => {
+    const order = [
+      LogisticStatus.IN_GUDANG, 
+      LogisticStatus.READY_FOR_PICKUP, 
+      LogisticStatus.PICKED_UP, 
+      LogisticStatus.DELIVERED
+    ];
+    const currentIndex = order.indexOf(currentStatus as LogisticStatus);
     const targetIndex = order.indexOf(targetStatus);
     
     if (currentIndex > targetIndex) return 'completed';
@@ -164,12 +225,24 @@ export default function PublicTracking() {
                         </div>
                         <div>
                            <div className="text-[10px] font-black text-blue-500 uppercase tracking-widest mb-1">Authenticated Asset</div>
-                           <h3 className="text-4xl font-black text-white tracking-tighter">{searchResult.name}</h3>
-                           <div className="flex items-center gap-3 mt-3">
+                           <h3 className="text-4xl font-black text-white tracking-tighter">{searchResult.itemName || (searchResult as any).name}</h3>
+                           <div className="flex flex-wrap items-center gap-3 mt-4">
                               <span className="px-3 py-1 bg-[#0f172a] rounded-lg border border-slate-800 text-[10px] font-mono font-bold text-slate-400 uppercase tracking-widest">{searchResult.qrcode}</span>
-                              <div className="h-2 w-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
+                              <span className="px-3 py-1 bg-emerald-500/10 rounded-lg border border-emerald-500/20 text-[10px] font-bold text-emerald-400 uppercase tracking-widest">{searchResult.category}</span>
+                              <span className="px-3 py-1 bg-slate-800 rounded-lg text-[10px] font-bold text-slate-300 uppercase tracking-widest">{searchResult.quantity} {searchResult.unit}</span>
                            </div>
                         </div>
+                     </div>
+
+                     <div className="grid grid-cols-2 gap-4 mb-8">
+                       <div className="p-4 bg-[#0f172a]/50 rounded-2xl border border-slate-800/50">
+                         <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest mb-1">Kondisi Barang</p>
+                         <p className="text-sm font-bold text-slate-300">{searchResult.condition || 'Layak Pakai'}</p>
+                       </div>
+                       <div className="p-4 bg-[#0f172a]/50 rounded-2xl border border-slate-800/50">
+                         <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest mb-1">Tujuan Bantuan</p>
+                         <p className="text-sm font-bold text-slate-300 truncate">{searchResult.destination || 'Gudang Pusat'}</p>
+                       </div>
                      </div>
                      
                      {/* Blockchain Ledger Insight */}
@@ -183,19 +256,19 @@ export default function PublicTracking() {
                         </div>
                         <div className="space-y-1 mb-10">
                           <p className="text-[10px] font-bold text-slate-600 uppercase tracking-widest">Sequence Timestamp</p>
-                          <p className="text-xl font-bold text-slate-200 tracking-tight">{format(searchResult.updatedAt, 'dd MMMM yyyy, HH:mm:ss')}</p>
+                          <p className="text-xl font-bold text-slate-200 tracking-tight">{searchResult.updatedAt ? format(new Date(searchResult.updatedAt), 'dd MMMM yyyy, HH:mm:ss') : 'N/A'}</p>
                         </div>
                         
-                        {searchResult.lastTxHash ? (
+                        {(searchResult.transactionHash || (searchResult as any).lastTxHash) ? (
                           <div className="space-y-3">
-                            <p className="text-[10px] font-bold text-slate-600 uppercase tracking-widest">Hash Proof ({searchResult.lastTxNetwork || 'SECURE LEDGER'})</p>
+                            <p className="text-[10px] font-bold text-slate-600 uppercase tracking-widest">Hash Proof ({(searchResult.network || (searchResult as any).lastTxNetwork || 'SECURE LEDGER')})</p>
                             <a 
-                              href={getExplorerUrl(searchResult.lastTxHash, searchResult.lastTxNetwork || BlockchainNetwork.SOLANA)}
+                              href={getExplorerUrl(searchResult.transactionHash || (searchResult as any).lastTxHash, (searchResult.network || (searchResult as any).lastTxNetwork || BlockchainNetwork.SOLANA) as BlockchainNetwork)}
                               target="_blank"
                               rel="noreferrer"
                               className="flex items-center justify-between p-5 bg-blue-500/5 hover:bg-blue-500/10 rounded-2xl border border-blue-500/20 transition-all font-mono text-[10px] text-blue-400 font-bold group/link"
                             >
-                               <span className="truncate">{searchResult.lastTxHash}</span>
+                               <span className="truncate">{searchResult.transactionHash || (searchResult as any).lastTxHash}</span>
                                <ExternalLink className="h-4 w-4 opacity-100 group-hover/link:translate-x-1 group-hover/link:-translate-y-1 transition-transform" />
                             </a>
                           </div>
@@ -216,26 +289,26 @@ export default function PublicTracking() {
                    </div>
                    <div className="flex flex-col">
                       <TimelineStep 
-                        title="Registered" 
-                        desc="Batch verified at global distribution hub."
+                        title="Diterima Admin" 
+                        desc="Barang telah diverifikasi dan masuk ke gudang utama."
                         status={getStepStatus(searchResult.status, LogisticStatus.IN_GUDANG)}
                         icon={Warehouse}
                       />
                       <TimelineStep 
-                        title="Assigned" 
-                        desc="Field agents engaged for transit operation."
-                        status={getStepStatus(searchResult.status, LogisticStatus.PICKED_UP)}
-                        icon={MapPin}
+                        title="Siap Dikirim" 
+                        desc="Barang telah diproses oleh tim gudang dan siap dikirim."
+                        status={getStepStatus(searchResult.status, LogisticStatus.READY_FOR_PICKUP)}
+                        icon={Package}
                       />
                       <TimelineStep 
-                        title="In Transit" 
-                        desc="Assets in motion via secure ground transport."
-                        status={getStepStatus(searchResult.status, LogisticStatus.IN_TRANSIT)}
+                        title="Dalam Pengiriman" 
+                        desc="Barang sedang dalam perjalanan menuju lokasi tujuan."
+                        status={getStepStatus(searchResult.status, LogisticStatus.PICKED_UP)}
                         icon={Truck}
                       />
                       <TimelineStep 
-                        title="Delivered" 
-                        desc="Terminal verified at target coordinates."
+                        title="Selesai Disalurkan" 
+                        desc="Barang telah sampai dan diterima di lokasi tujuan."
                         status={getStepStatus(searchResult.status, LogisticStatus.DELIVERED)}
                         icon={CheckCircle}
                       />
@@ -257,6 +330,122 @@ export default function PublicTracking() {
         ) : null}
       </AnimatePresence>
 
+      {/* Fund Usage Transparency Ledger */}
+      <div className="space-y-12 py-12 border-y border-slate-900">
+        <div className="text-center space-y-4">
+           <div className="inline-flex items-center gap-2 px-4 py-1.5 bg-emerald-500/10 border border-emerald-500/20 rounded-full text-[10px] font-black text-emerald-400 uppercase tracking-widest">
+              <DollarSign className="h-3 w-3" /> Transparansi Penggunaan Dana
+           </div>
+           <h3 className="text-4xl font-black text-white tracking-tighter uppercase italic">Disaster Fund Transparency</h3>
+           <p className="text-slate-500 max-w-2xl mx-auto text-sm font-medium">
+             Seluruh penggunaan dana bantuan dicatat secara permanen di blockchain Solana untuk menjamin akuntabilitas penyaluran bantuan kepada yang membutuhkan.
+           </p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-6">
+          {fundUsage.length === 0 ? (
+            <div className="text-center py-20 bg-slate-900/20 rounded-[3rem] border border-slate-900">
+               <CreditCard className="h-12 w-12 text-slate-700 mx-auto mb-4 opacity-20" />
+               <p className="text-slate-600 font-bold uppercase tracking-widest text-xs">Belum ada catatan penggunaan dana bantuan</p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {fundUsage.map((item) => (
+                <motion.div 
+                  initial={{ opacity: 0, y: 10 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true }}
+                  key={item.id} 
+                  className="bg-[#1e293b] p-8 rounded-[2.5rem] border border-slate-800 shadow-xl group hover:border-emerald-500/30 transition-all"
+                >
+                  <div className="flex flex-col lg:flex-row justify-between gap-8">
+                    <div className="flex-1 space-y-6">
+                      <div className="flex items-start gap-5">
+                         <div className="p-4 bg-emerald-600 rounded-2xl shadow-xl shadow-emerald-600/10 shrink-0">
+                            <Send className="h-6 w-6 text-white" />
+                         </div>
+                         <div>
+                            <div className="flex items-center gap-3 mb-1">
+                               <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-400 rounded text-[9px] font-black uppercase tracking-widest">{item.usageType}</span>
+                               <span className="text-[10px] font-mono text-slate-600 font-bold uppercase tracking-widest">UID: {item.uid}</span>
+                            </div>
+                            <h4 className="text-2xl font-black text-white tracking-tight">{item.purpose}</h4>
+                         </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+                         <div className="space-y-1">
+                            <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Nominal Disalurkan</p>
+                            <p className="text-xl font-black text-emerald-400">{item.amountSol} SOL</p>
+                         </div>
+                         <div className="space-y-1">
+                            <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Kategori</p>
+                            <p className="text-sm font-bold text-slate-200">{item.category}</p>
+                         </div>
+                         <div className="space-y-1">
+                            <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Penerima / Lokasi</p>
+                            <div className="flex items-center gap-1.5">
+                               <MapPin className="h-3 w-3 text-slate-500" />
+                               <p className="text-sm font-bold text-slate-200 truncate">{item.recipient}</p>
+                            </div>
+                         </div>
+                         <div className="space-y-1">
+                            <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Waktu Transaksi</p>
+                            <div className="flex items-center gap-1.5 text-slate-400">
+                               <Calendar className="h-3 w-3" />
+                               <p className="text-[11px] font-bold">{format(item.createdAt, 'dd MMM yyyy, HH:mm')}</p>
+                            </div>
+                         </div>
+                      </div>
+
+                      {item.note && (
+                        <div className="p-4 bg-[#0f172a] rounded-2xl border border-slate-800 text-xs text-slate-400 font-medium leading-relaxed italic">
+                          "{item.note}"
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="lg:w-72 space-y-4">
+                       <div className="p-5 bg-slate-900/50 rounded-3xl border border-slate-800 space-y-4">
+                          <div className="flex items-center justify-between">
+                             <div className="flex items-center gap-2 text-[9px] font-black text-blue-400 uppercase tracking-widest">
+                                <ShieldCheck className="h-3 w-3" /> On-Chain Verified
+                             </div>
+                             <div className={cn(
+                               "px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-tighter",
+                               item.status === 'Selesai Disalurkan' ? "bg-emerald-500/20 text-emerald-400" : "bg-amber-500/20 text-amber-400"
+                             )}>
+                                {item.status}
+                             </div>
+                          </div>
+
+                          <div className="space-y-2">
+                             <p className="text-[9px] font-bold text-slate-600 uppercase tracking-widest font-mono">Solana Transaction Hash</p>
+                             <a 
+                               href={`https://explorer.solana.com/tx/${item.transactionHash}?cluster=devnet`}
+                               target="_blank"
+                               rel="noreferrer"
+                               className="flex items-center justify-between p-3 bg-blue-500/10 hover:bg-blue-500/20 rounded-xl border border-blue-500/20 transition-all group/link"
+                             >
+                                <span className="text-[10px] font-mono text-blue-400 font-bold truncate max-w-[140px]">{item.transactionHash}</span>
+                                <ExternalLink className="h-3.5 w-3.5 text-blue-400 group-hover/link:translate-x-0.5 group-hover/link:-translate-y-0.5 transition-transform" />
+                             </a>
+                          </div>
+                       </div>
+                       {item.supportingProof && (
+                         <div className="flex items-center gap-2 px-6 text-[10px] font-bold text-slate-500 uppercase tracking-widest italic group-hover:text-emerald-400 transition-colors">
+                            <Database className="h-3 w-3" /> Supporting Proof Attached
+                         </div>
+                       )}
+                    </div>
+                  </div>
+                </motion.div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* Global Explorer */}
       {!searchResult && (
         <div className="space-y-8">
@@ -276,19 +465,22 @@ export default function PublicTracking() {
                          <Package className="h-6 w-6" />
                       </div>
                       <div>
-                         <h4 className="font-bold text-white group-hover:text-blue-400 transition-colors leading-tight">{item.name}</h4>
+                         <h4 className="font-bold text-white group-hover:text-blue-400 transition-colors leading-tight">{item.itemName || (item as any).name}</h4>
                          <p className="text-[10px] text-slate-500 uppercase font-mono mt-1 tracking-widest">{item.qrcode}</p>
                       </div>
                    </div>
                    <div className="flex flex-col items-end gap-2">
                        <span className={cn(
                           "px-3 py-1 rounded-lg border text-[9px] font-black uppercase tracking-widest",
-                          item.status === LogisticStatus.DELIVERED ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" : "bg-blue-500/10 text-blue-400 border-blue-500/20"
+                          item.status === LogisticStatus.DELIVERED ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" : 
+                          item.status === LogisticStatus.READY_FOR_PICKUP ? "bg-purple-500/10 text-purple-400 border-purple-500/20" :
+                          item.status === LogisticStatus.PICKED_UP ? "bg-amber-500/10 text-amber-400 border-amber-500/20" :
+                          "bg-blue-500/10 text-blue-400 border-blue-500/20"
                        )}>
                           {item.status}
                        </span>
                        <span className="text-[9px] text-slate-600 font-mono font-bold uppercase tracking-widest">
-                          {format(item.updatedAt, 'HH:mm')} • {format(item.updatedAt, 'dd MMM')}
+                          {item.updatedAt ? format(new Date(item.updatedAt), 'HH:mm') : 'N/A'} • {item.updatedAt ? format(new Date(item.updatedAt), 'dd MMM') : 'N/A'}
                        </span>
                    </div>
                 </button>

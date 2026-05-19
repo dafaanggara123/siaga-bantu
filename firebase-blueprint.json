@@ -47,6 +47,28 @@
         "timestamp": { "type": "number" }
       },
       "required": ["donorId", "amount", "txHash", "timestamp"]
+    },
+    "FundUsage": {
+      "title": "Fund Usage Record",
+      "description": "Transparent fund usage records for disaster relief",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "usageType": { "type": "string" },
+        "amountSol": { "type": "number" },
+        "category": { "type": "string" },
+        "purpose": { "type": "string" },
+        "recipient": { "type": "string" },
+        "note": { "type": "string" },
+        "supportingProof": { "type": "string" },
+        "status": { "type": "string" },
+        "adminWallet": { "type": "string" },
+        "transactionHash": { "type": "string" },
+        "network": { "type": "string" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["uid", "usageType", "amountSol", "purpose", "recipient", "status", "adminWallet", "transactionHash", "network", "createdAt"]
     }
   },
   "firestore": {
@@ -61,6 +83,10 @@
     "/donations/{donationId}": {
       "schema": "Donation",
       "description": "Financial donation records"
+    },
+    "/fundUsage/{usageId}": {
+      "schema": "FundUsage",
+      "description": "Transparency records for fund usage"
     }
   }
 }

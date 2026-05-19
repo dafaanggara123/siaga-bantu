@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { collection, addDoc, query, where, onSnapshot, getDocs, updateDoc } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../../firebase';
 import { UserProfile, Goods, LogisticStatus, BlockchainNetwork } from '../../types';
-import { Package, Plus, QrCode, ClipboardList, Warehouse, History, ArrowRight, CheckCircle, Info, Scan, Camera, ArrowUpRight, Search } from 'lucide-react';
+import { Package, Plus, QrCode, ClipboardList, Warehouse, History, ArrowRight, CheckCircle, Info, Scan, Camera, ArrowUpRight, Search, MapPin } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { Html5QrcodeScanner } from 'html5-qrcode';
 import { motion, AnimatePresence } from 'motion/react';
@@ -33,24 +33,55 @@ export default function WarehouseDashboard({ user, walletConnected, walletNetwor
   const [searchTerm, setSearchTerm] = useState('');
 
   useEffect(() => {
-    // Synchronized with Admin: Show ALL goods in the system
-    const q = collection(db, 'goods');
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const items: Goods[] = [];
-      snapshot.forEach((doc) => {
-        items.push({ id: doc.id, ...doc.data() } as Goods);
-      });
-      // Standardized sorting: updatedAt descending
-      setGoods(items.sort((a, b) => b.updatedAt - a.updatedAt));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'goods');
-    });
+    const loadLogistics = () => {
+      const savedLogistics = localStorage.getItem("logistics");
+      if (savedLogistics) {
+        const allLogistics = JSON.parse(savedLogistics) as Goods[];
+        setGoods(allLogistics.sort((a, b) => {
+          const timeA = new Date(a.updatedAt || 0).getTime();
+          const timeB = new Date(b.updatedAt || 0).getTime();
+          return timeB - timeA;
+        }));
+      }
+    };
 
-    return () => unsubscribe();
+    loadLogistics();
+    
+    // Polling and events for synchronicity across dashboard roles
+    window.addEventListener('storage', loadLogistics);
+    const interval = setInterval(loadLogistics, 3000);
+
+    return () => {
+      window.removeEventListener('storage', loadLogistics);
+      clearInterval(interval);
+    };
   }, []);
 
+  const prepareShipment = (id: string) => {
+    const savedLogistics = localStorage.getItem("logistics");
+    if (!savedLogistics) return;
+
+    const allLogistics = JSON.parse(savedLogistics) as Goods[];
+    const updatedLogistics = allLogistics.map(item => {
+      if (String(item.id) === String(id)) {
+        return {
+          ...item,
+          status: LogisticStatus.READY_FOR_PICKUP,
+          deliveryStatus: "Menunggu Relawan",
+          updatedAt: new Date().toISOString()
+        };
+      }
+      return item;
+    });
+
+    localStorage.setItem("logistics", JSON.stringify(updatedLogistics));
+    setGoods(updatedLogistics);
+    setNotification({ msg: "Barang siap dijemput oleh relawan.", type: 'success' });
+    setTimeout(() => setNotification(null), 5000);
+  };
+
   const filteredGoods = goods.filter(g => 
-    g.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+    (g.itemName || (g as any).name || "").toLowerCase().includes(searchTerm.toLowerCase()) || 
     g.qrcode.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
@@ -59,11 +90,16 @@ export default function WarehouseDashboard({ user, walletConnected, walletNetwor
     setScanning(false);
     
     try {
-      // Find item in Firestore (it might not be in the local 'goods' list if it's new/from donor)
-      const q = query(collection(db, 'goods'), where('qrcode', '==', decodedText));
-      const snap = await getDocs(q);
+      const savedLogistics = localStorage.getItem("logistics");
+      if (!savedLogistics) {
+        setNotification({ msg: "Database logistik kosong.", type: "error" });
+        return;
+      }
+
+      const allLogistics = JSON.parse(savedLogistics) as Goods[];
+      const itemIndex = allLogistics.findIndex(g => g.qrcode === decodedText);
       
-      if (snap.empty) {
+      if (itemIndex === -1) {
         setNotification({
           msg: `Item dengan QR ${decodedText} tidak ditemukan di sistem.`,
           type: 'error'
@@ -71,33 +107,40 @@ export default function WarehouseDashboard({ user, walletConnected, walletNetwor
         return;
       }
 
-      const docRef = snap.docs[0].ref;
-      const data = snap.docs[0].data() as Goods;
+      const item = allLogistics[itemIndex];
 
-      // Logic: If it's a donor item or unassigned, this warehouse receives it
-      if (data.warehouseId === 'DONOR_SOURCE' || !data.warehouseId) {
-        await updateDoc(docRef, {
+      // Reception Logic: If it's a donor item or unassigned or marked as moving, this warehouse receives it
+      if (item.verificationStatus === "APPROVED" && (item.warehouseStatus === "Belum Masuk Gudang" || !item.warehouseId)) {
+        const updatedItem: Goods = {
+          ...item,
           warehouseId: user.uid,
           status: LogisticStatus.IN_GUDANG,
-          updatedAt: Date.now()
-        });
+          warehouseStatus: "Masuk Gudang",
+          currentLocation: "Gudang Logistik",
+          updatedAt: new Date().toISOString()
+        };
+
+        const updatedLogistics = [...allLogistics];
+        updatedLogistics[itemIndex] = updatedItem;
+        localStorage.setItem("logistics", JSON.stringify(updatedLogistics));
+        setGoods(updatedLogistics);
+
         setNotification({
-          msg: `Barang "${data.name}" berhasil diterima di gudang Anda.`,
+          msg: `Barang "${updatedItem.itemName || (updatedItem as any).name}" berhasil diterima di gudang Anda.`,
           type: 'success'
         });
-      } else if (data.warehouseId === user.uid) {
+      } else if (item.warehouseId === user.uid) {
         setNotification({
-          msg: `Info Barang: ${data.name} sudah ada di inventaris Anda. Status: ${data.status}`,
+          msg: `Info Barang: ${item.itemName || (item as any).name} sudah ada di inventaris Anda. Status: ${item.status}`,
           type: 'success'
         });
       } else {
         setNotification({
-          msg: `Barang "${data.name}" terdaftar di gudang lain.`,
+          msg: `Barang "${item.itemName || (item as any).name}" terdaftar di gudang lain.`,
           type: 'error'
         });
       }
     } catch (error: any) {
-      handleFirestoreError(error, OperationType.UPDATE, 'goods');
       setNotification({
         msg: 'Gagal memproses QR code.',
         type: 'error'
@@ -111,27 +154,46 @@ export default function WarehouseDashboard({ user, walletConnected, walletNetwor
     setLoading(true);
     try {
       const qrcode = `BLX-${Date.now()}-${Math.random().toString(36).substr(2, 5).toUpperCase()}`;
-      const newGoods = {
-        name,
+      const newGoods: Goods = {
+        id: `GOOD-${Date.now()}`,
+        uid: `GOOD-${Date.now()}`,
+        itemName: name,
         category,
         quantity,
         unit,
         status: LogisticStatus.IN_GUDANG,
+        verificationStatus: "APPROVED",
+        warehouseStatus: "Masuk Gudang",
+        currentLocation: "Gudang Logistik",
+        deliveryStatus: "Belum Dikirim",
+        assignedVolunteer: "",
         warehouseId: user.uid,
         qrcode,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
+        donorName: "Admin/Gudang",
+        donorWallet: user.walletAddress || "",
+        transactionHash: "",
+        network: "Solana Devnet",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        verifiedAt: new Date().toISOString(),
+        verifiedBy: user.displayName || "Admin",
+        source: "Input Manual Gudang"
       };
-      await addDoc(collection(db, 'goods'), newGoods);
+      
+      const savedLogistics = localStorage.getItem("logistics");
+      const currentLogistics = savedLogistics ? JSON.parse(savedLogistics) : [];
+      const updatedLogistics = [newGoods, ...currentLogistics];
+      localStorage.setItem("logistics", JSON.stringify(updatedLogistics));
+      setGoods(updatedLogistics);
+
       setName('');
       setShowAddForm(false);
       setNotification({
-        msg: `Barang "${newGoods.name}" berhasil diregistrasi di gudang.`,
+        msg: `Barang "${newGoods.itemName}" berhasil diregistrasi di gudang.`,
         type: 'success'
       });
       setTimeout(() => setNotification(null), 5000);
     } catch (error: any) {
-      handleFirestoreError(error, OperationType.CREATE, 'goods');
       setNotification({
         msg: `Gagal meregistrasi barang: ${error.message || 'Error tidak diketahui'}`,
         type: 'error'
@@ -203,13 +265,15 @@ export default function WarehouseDashboard({ user, walletConnected, walletNetwor
             <p className="text-[10px] uppercase font-bold text-slate-500 tracking-widest mt-1">Gudang: {user.displayName}</p>
           </div>
         </div>
-        <button 
-          onClick={() => setShowAddForm(true)}
-          className="w-full sm:w-auto bg-blue-600 text-white px-6 py-3 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-blue-500 transition-all shadow-lg shadow-blue-600/20 cursor-pointer"
-        >
-          <Plus className="h-5 w-5" />
-          Input Barang Baru
-        </button>
+        <div className="flex flex-wrap gap-3 w-full sm:w-auto">
+          <button 
+            onClick={() => setShowAddForm(true)}
+            className="flex-1 sm:flex-none bg-blue-600 text-white px-6 py-3 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-blue-500 transition-all shadow-lg shadow-blue-600/20 cursor-pointer"
+          >
+            <Plus className="h-5 w-5" />
+            Input Barang
+          </button>
+        </div>
         <button 
           onClick={() => {
             setScanning(true);
@@ -389,12 +453,13 @@ export default function WarehouseDashboard({ user, walletConnected, walletNetwor
                 <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">IDENTIFIER / SOURCE</th>
                 <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">BLOCKCHAIN RECEIPT</th>
                 <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">NODE STATUS</th>
+                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">ACTIONS</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800">
               {filteredGoods.length === 0 ? (
                 <tr>
-                  <td colSpan={3} className="px-6 py-16 text-center text-slate-600 italic font-mono text-xs uppercase tracking-widest">
+                  <td colSpan={4} className="px-6 py-16 text-center text-slate-600 italic font-mono text-xs uppercase tracking-widest">
                     No matching records in warehouse ledger
                   </td>
                 </tr>
@@ -405,15 +470,26 @@ export default function WarehouseDashboard({ user, walletConnected, walletNetwor
                   className="hover:bg-slate-800/40 transition-colors group"
                 >
                   <td className="px-6 py-4">
-                    <div className="font-bold text-slate-200">{item.name}</div>
+                    <div className="font-bold text-slate-200">{item.itemName || (item as any).name}</div>
                     <div className="flex flex-wrap items-center gap-2 mt-1">
                       <div className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">{item.category} • {item.quantity} {item.unit}</div>
-                      {item.donorId && (
+                      {item.condition && (
+                        <span className="text-[8px] font-bold text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded border border-slate-700 uppercase">
+                          {item.condition}
+                        </span>
+                      )}
+                      {(item.donorName || item.donorId) && (
                         <span className="text-[8px] font-bold text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded border border-blue-500/20 uppercase tracking-[0.05em]">
                           Donatur: {item.donorName || 'Anonim'}
                         </span>
                       )}
                     </div>
+                    {item.destination && (
+                      <div className="mt-2 flex items-center gap-1.5 text-[9px] text-slate-500 font-medium italic">
+                        <MapPin className="h-3 w-3 text-red-500/50" />
+                        Tujuan: {item.destination}
+                      </div>
+                    )}
                   </td>
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-4">
@@ -424,18 +500,18 @@ export default function WarehouseDashboard({ user, walletConnected, walletNetwor
                         <code className="text-[10px] font-mono bg-[#0f172a] px-2 py-1 rounded border border-slate-800 text-blue-400">
                           {item.qrcode}
                         </code>
-                        {item.lastTxHash ? (
+                        {(item.transactionHash || (item as any).lastTxHash) ? (
                           <div className="flex flex-col gap-2">
                             <div className="flex items-center gap-1 text-[9px] text-emerald-500 font-bold uppercase tracking-widest animate-pulse">
                               <History className="h-3 w-3" /> ON-CHAIN PERSISTENCE
                             </div>
                             <a 
-                              href={getExplorerUrl(item.lastTxHash, item.lastTxNetwork || walletNetwork || BlockchainNetwork.SOLANA)}
+                              href={getExplorerUrl(item.transactionHash || (item as any).lastTxHash, (item.network || (item as any).lastTxNetwork || BlockchainNetwork.SOLANA) as BlockchainNetwork)}
                               target="_blank"
                               rel="noreferrer"
                               className="text-[9px] font-mono text-blue-500 hover:text-blue-400 truncate max-w-[150px]"
                             >
-                              {item.lastTxHash}
+                              {item.transactionHash || (item as any).lastTxHash}
                             </a>
                           </div>
                         ) : (
@@ -450,13 +526,33 @@ export default function WarehouseDashboard({ user, walletConnected, walletNetwor
                      <div className="flex items-center gap-3">
                         <span className={cn(
                           "h-2 w-2 rounded-full",
-                          item.lastTxHash ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" : "bg-slate-700"
+                          (item.transactionHash || (item as any).lastTxHash) ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" : "bg-slate-700"
                         )} />
                         <StatusBadge status={item.status} />
                      </div>
                      <div className="text-[9px] text-slate-600 mt-2 font-mono uppercase">
-                        Sync: {format(item.updatedAt, 'HH:mm:ss')}
+                        Sync: {item.updatedAt ? format(new Date(item.updatedAt), 'HH:mm:ss') : 'N/A'}
                      </div>
+                  </td>
+                  <td className="px-6 py-4">
+                    {item.status === LogisticStatus.IN_GUDANG && (
+                       <button 
+                         onClick={() => prepareShipment(item.id)}
+                         className="px-4 py-2 bg-blue-600/20 text-blue-400 border border-blue-500/30 rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-blue-600 hover:text-white transition-all flex items-center gap-2 group"
+                       >
+                         Siapkan Pengiriman
+                         <ArrowUpRight className="h-3 w-3 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
+                       </button>
+                    )}
+                    {item.status === LogisticStatus.READY_FOR_PICKUP && (
+                        <span className="text-[9px] font-bold text-slate-500 italic">Menunggu Relawan...</span>
+                    )}
+                    {item.status === LogisticStatus.PICKED_UP && (
+                        <span className="text-[9px] font-bold text-amber-500 italic">Dalam Pengiriman</span>
+                    )}
+                    {item.status === LogisticStatus.DELIVERED && (
+                        <span className="text-[9px] font-bold text-emerald-500 italic">Selesai Disalurkan</span>
+                    )}
                   </td>
                 </motion.tr>
               ))}
@@ -483,8 +579,8 @@ function StatSummaryCard({ icon, label, value, subtext }: { icon: React.ReactNod
   );
 }
 
-function StatusBadge({ status }: { status: LogisticStatus }) {
-  const styles = {
+function StatusBadge({ status }: { status: LogisticStatus | string }) {
+  const styles: Record<string, string> = {
     [LogisticStatus.IN_GUDANG]: "bg-blue-500/10 text-blue-400 border-blue-500/20",
     [LogisticStatus.PICKED_UP]: "bg-purple-500/10 text-purple-400 border-purple-500/20",
     [LogisticStatus.IN_TRANSIT]: "bg-amber-500/10 text-amber-400 border-amber-500/20",
@@ -494,7 +590,7 @@ function StatusBadge({ status }: { status: LogisticStatus }) {
   return (
     <span className={cn(
       "px-3 py-1 rounded-full text-[9px] font-bold uppercase tracking-widest border",
-      styles[status]
+      styles[status as string] || "bg-slate-500/10 text-slate-500 border-slate-500/20"
     )}>
       {status}
     </span>

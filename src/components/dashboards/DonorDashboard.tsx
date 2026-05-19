@@ -6,7 +6,7 @@ import { Heart, Wallet, History, ExternalLink, ArrowRight, ShieldCheck, CheckCir
 import { motion, AnimatePresence } from 'motion/react';
 import { format } from 'date-fns';
 import { generateTxHash, getExplorerUrl, getCurrencySymbol, cn } from '../../lib/utils';
-import { sendSolanaTransaction } from '../../services/solanaService';
+import { sendSolanaTransaction, sendGoodsDonationMemoToSolana, getSolanaDevnetBalance } from '../../services/solanaService';
 
 interface DonorDashboardProps {
   user: UserProfile;
@@ -21,6 +21,7 @@ export default function DonorDashboard({ user, walletConnected, walletNetwork, o
   const [amount, setAmount] = useState<string>('0.5');
   const [loading, setLoading] = useState(false);
   const [txHash, setTxHash] = useState<string | null>(null);
+  const [solBalance, setSolBalance] = useState<number>(0);
 
   const currencySymbol = getCurrencySymbol(walletNetwork || BlockchainNetwork.SOLANA);
 
@@ -29,34 +30,60 @@ export default function DonorDashboard({ user, walletConnected, walletNetwork, o
   const [category, setCategory] = useState('Makanan');
   const [quantity, setQuantity] = useState(1);
   const [unit, setUnit] = useState('Box');
+  const [condition, setCondition] = useState('Baru');
+  const [destination, setDestination] = useState('Posko Utama - Jakarta');
+  const [notes, setNotes] = useState('');
   const [showGoodsForm, setShowGoodsForm] = useState(false);
+  const [successGoods, setSuccessGoods] = useState<Goods | null>(null);
   const [notification, setNotification] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
 
+  const refreshSolBalance = async () => {
+    try {
+      if (!user.walletAddress) return;
+      const balance = await getSolanaDevnetBalance(user.walletAddress);
+      setSolBalance(balance);
+    } catch (error) {
+      console.error("Gagal refresh saldo SOL:", error);
+    }
+  };
+
   useEffect(() => {
+    refreshSolBalance();
+  }, [user.walletAddress]);
+
+  useEffect(() => {
+    // Load donated goods from localStorage
+    const savedGoodsDonations = localStorage.getItem("goodsDonations");
+    if (savedGoodsDonations) {
+      const allGoods = JSON.parse(savedGoodsDonations) as Goods[];
+      // Filter only for this donor
+      setDonatedGoods(allGoods.filter(g => g.donorId === user.uid).sort((a, b) => 
+        (typeof b.createdAt === 'number' ? b.createdAt : new Date(b.createdAt).getTime()) - 
+        (typeof a.createdAt === 'number' ? a.createdAt : new Date(a.createdAt).getTime())
+      ));
+    }
+
     const q = query(collection(db, 'donations'), where('donorId', '==', user.uid));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    const unsubscribeDonations = onSnapshot(q, (snapshot) => {
       const items: Donation[] = [];
       snapshot.forEach((doc) => items.push({ id: doc.id, ...doc.data() } as Donation));
       setDonations(items.sort((a, b) => b.timestamp - a.timestamp));
     }, (error) => handleFirestoreError(error, OperationType.LIST, 'donations'));
 
-    return () => unsubscribe();
-  }, [user.uid]);
-
-  useEffect(() => {
-    const q = query(collection(db, 'goods'), where('donorId', '==', user.uid));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const items: Goods[] = [];
-      snapshot.forEach((doc) => items.push({ id: doc.id, ...doc.data() } as Goods));
-      setDonatedGoods(items.sort((a, b) => b.createdAt - a.createdAt));
-    }, (error) => handleFirestoreError(error, OperationType.LIST, 'goods'));
-
-    return () => unsubscribe();
+    return () => unsubscribeDonations();
   }, [user.uid]);
 
   const handleDonate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!walletConnected) return;
+    if (!walletConnected) {
+      setNotification({
+        msg: 'Silakan hubungkan Crypto E-Wallet Anda terlebih dahulu untuk memproses donasi finansial.',
+        type: 'error'
+      });
+      setTimeout(() => setNotification(null), 5000);
+      onConnect();
+      return;
+    }
 
     setLoading(true);
     setTxHash(null);
@@ -80,16 +107,26 @@ export default function DonorDashboard({ user, walletConnected, walletNetwork, o
       const donation: Omit<Donation, 'id'> = {
         donorId: user.uid,
         donorName: user.displayName,
-        amount: parseInt(amount),
+        amount: parseFloat(amount),
         txHash: hash,
         txNetwork: walletNetwork || BlockchainNetwork.SOLANA,
         timestamp: Date.now()
       };
 
       await addDoc(collection(db, 'donations'), donation);
-      setAmount('50000');
-    } catch (error) {
+      setAmount('0.5');
+      setNotification({
+        msg: `Donasi sebesar ${donation.amount} ${getCurrencySymbol(donation.txNetwork)} berhasil dikirim!`,
+        type: 'success'
+      });
+      setTimeout(() => setNotification(null), 5000);
+      await refreshSolBalance();
+    } catch (error: any) {
       handleFirestoreError(error, OperationType.CREATE, 'donations');
+      setNotification({
+        msg: `Gagal mengirim donasi: ${error.message || 'Error tidak diketahui'}`,
+        type: 'error'
+      });
     } finally {
       setLoading(false);
     }
@@ -97,48 +134,110 @@ export default function DonorDashboard({ user, walletConnected, walletNetwork, o
 
   const handleDonateGoods = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!walletConnected) {
+      setNotification({
+        msg: 'Harap hubungkan e-wallet Anda untuk memverifikasi donasi barang di blockchain.',
+        type: 'error'
+      });
+      setTimeout(() => setNotification(null), 5000);
+      onConnect();
+      return;
+    }
+
+    if (!goodName || !quantity || !unit || !condition || !destination) {
+      setNotification({ msg: 'Lengkapi semua data donasi barang.', type: 'error' });
+      return;
+    }
+
     setLoading(true);
     try {
-      const qrcode = `DN-${Date.now()}-${Math.random().toString(36).substr(2, 5).toUpperCase()}`;
+      const qrcode = `BLX-${Date.now()}-${Math.random().toString(36).substr(2, 5).toUpperCase()}`;
       
-      // Generate on-chain hash for goods registration proof
-      let hash = '';
-      if (walletNetwork === BlockchainNetwork.SOLANA && user.walletAddress) {
-        try {
-          hash = await sendSolanaTransaction(user.walletAddress);
-        } catch (e) {
-          console.warn('Real transaction failed for goods, using simulation:', e);
-          const chars = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-          hash = Array.from({length: 88}, () => chars[Math.floor(Math.random() * chars.length)]).join('');
-        }
-      }
-
-      const newGoods: Omit<Goods, 'id'> = {
-        name: goodName,
+      const goodsData = {
+        itemName: goodName,
         category,
         quantity,
         unit,
-        status: LogisticStatus.IN_GUDANG, // Set directly to available for simplicity
-        warehouseId: 'DONOR_SOURCE', // Placeholder
+        condition,
+        destination,
+        note: notes,
+      };
+
+      // Real on-chain hash for goods registration proof via Solana Memo Program
+      let hash = '';
+      try {
+        const { solana } = window as any;
+        if (solana?.isPhantom && solana.isConnected) {
+          hash = await sendGoodsDonationMemoToSolana(solana, goodsData);
+        } else {
+          throw new Error('Hubungkan wallet Phantom terlebih dahulu.');
+        }
+      } catch (e: any) {
+        console.error('Real transaction failed for goods:', e);
+        setNotification({
+          msg: e.message || 'Gagal mengirim donasi barang.',
+          type: 'error'
+        });
+        setLoading(false);
+        return;
+      }
+
+      // New data structure as requested by user
+      const newGoodsDonation: Goods = {
+        id: `GOOD-${Date.now()}`,
+        uid: `GOOD-${Date.now()}`,
+        itemName: goodName,
+        category,
+        quantity,
+        unit,
+        condition,
+        destination,
+        note: notes,
+        donorName: user.displayName || "Anonim",
+        donorWallet: user.walletAddress || "",
+        transactionHash: hash,
+        network: "Solana Devnet",
+        source: "Donasi Donatur",
+        status: LogisticStatus.PENDING_ADMIN,
+        verificationStatus: "PENDING",
+        qrcode: qrcode,
+        warehouseId: 'WAITING_VERIFICATION',
         donorId: user.uid,
-        donorName: user.displayName,
-        qrcode,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        lastTxHash: hash || undefined,
-        lastTxNetwork: walletNetwork || BlockchainNetwork.SOLANA,
+        currentLocation: "Donatur",
+        warehouseStatus: "Belum Masuk Gudang",
+        deliveryStatus: "Belum Dikirim",
+        assignedVolunteer: "",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        verifiedAt: null,
+        verifiedBy: null,
+        deliveredAt: null,
+        deliveredBy: null,
+        receivedAt: null,
+        receivedBy: null
       };
       
-      await addDoc(collection(db, 'goods'), newGoods);
+      // Save to localStorage as requested
+      const savedGoodsDonations = localStorage.getItem("goodsDonations");
+      const currentGoods = savedGoodsDonations ? JSON.parse(savedGoodsDonations) : [];
+      const updatedGoods = [newGoodsDonation, ...currentGoods];
+      localStorage.setItem("goodsDonations", JSON.stringify(updatedGoods));
+
+      // Update local state
+      setDonatedGoods(prev => [newGoodsDonation, ...prev]);
+      setSuccessGoods(newGoodsDonation);
       setGoodName('');
+      setNotes('');
+      setQuantity(1);
       setShowGoodsForm(false);
+      
       setNotification({
-        msg: `Donasi barang "${newGoods.name}" berhasil dikirim ke jalur logistik!`,
+        msg: "Donasi barang berhasil dicatat dan menunggu verifikasi admin.",
         type: 'success'
       });
       setTimeout(() => setNotification(null), 5000);
+      await refreshSolBalance();
     } catch (error: any) {
-      handleFirestoreError(error, OperationType.CREATE, 'goods');
       setNotification({
         msg: `Gagal mengirim donasi: ${error.message || 'Error tidak diketahui'}`,
         type: 'error'
@@ -176,6 +275,83 @@ export default function DonorDashboard({ user, walletConnected, walletNetwork, o
               </h5>
               <p className="text-sm font-bold leading-tight">{notification.msg}</p>
             </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Goods Donation Success Modal */}
+      <AnimatePresence>
+        {successGoods && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[400] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md"
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              className="bg-[#1e293b] border border-slate-700 rounded-[3rem] w-full max-w-lg p-10 relative overflow-hidden shadow-2xl"
+            >
+              <div className="absolute top-0 right-0 -mr-20 -mt-20 w-80 h-80 bg-emerald-500/10 rounded-full blur-3xl" />
+              
+              <div className="relative text-center">
+                <div className="mx-auto w-24 h-24 bg-emerald-500 rounded-[2rem] flex items-center justify-center mb-8 shadow-2xl shadow-emerald-900/40 rotate-12">
+                  <CheckCircle className="h-12 w-12 text-white -rotate-12" />
+                </div>
+                
+                <h3 className="text-3xl font-black text-white mb-2 leading-tight">Donasi Barang Berhasil Dicatat</h3>
+                <p className="text-emerald-400 font-bold uppercase tracking-widest text-[10px] mb-8">Permanently Anchored on Solana Devnet</p>
+                
+                <div className="bg-[#0f172a]/80 border border-slate-800 rounded-3xl p-6 text-left space-y-4 mb-8">
+                  <div className="flex justify-between items-center pb-3 border-b border-white/5">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Detail Barang</span>
+                    <span className="text-sm font-bold text-white">{successGoods.itemName}</span>
+                  </div>
+                  <div className="flex justify-between items-center pb-3 border-b border-white/5">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Jumlah & Satuan</span>
+                    <span className="text-sm font-bold text-white">{successGoods.quantity} {successGoods.unit}</span>
+                  </div>
+                  <div className="flex justify-between items-center pb-3 border-b border-white/5">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Tujuan Bantuan</span>
+                    <span className="text-sm font-bold text-white">{successGoods.destination}</span>
+                  </div>
+                  <div className="flex justify-between items-center pb-3 border-b border-white/5">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Status</span>
+                    <span className="px-3 py-1 bg-amber-500/10 text-amber-400 rounded-full text-[10px] font-black uppercase tracking-tighter border border-amber-500/20">{successGoods.status}</span>
+                  </div>
+                  <div className="flex justify-between items-center pb-3 border-b border-white/5">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Network</span>
+                    <span className="text-sm font-bold text-blue-400">Solana Devnet</span>
+                  </div>
+                  <div className="space-y-1">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Transaction Hash</span>
+                    <code className="block p-3 bg-black/40 rounded-xl text-[10px] font-mono text-blue-400 overflow-hidden text-ellipsis whitespace-nowrap">
+                      {successGoods.transactionHash}
+                    </code>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-3">
+                  <a 
+                    href={getExplorerUrl(successGoods.transactionHash || '', (successGoods.network as BlockchainNetwork) || BlockchainNetwork.SOLANA)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="w-full py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-blue-900/20"
+                  >
+                    Lihat di Solana Explorer
+                    <ExternalLink className="h-4 w-4" />
+                  </a>
+                  <button 
+                    onClick={() => setSuccessGoods(null)}
+                    className="w-full py-4 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-2xl font-bold transition-all"
+                  >
+                    Tutup
+                  </button>
+                </div>
+              </div>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -229,11 +405,34 @@ export default function DonorDashboard({ user, walletConnected, walletNetwork, o
                   </div>
                 </div>
 
+                <div className="p-4 bg-[#0f172a]/50 border border-slate-800 rounded-3xl flex items-center justify-between group">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-blue-500/10 rounded-xl border border-blue-500/20">
+                      <Wallet className="h-4 w-4 text-blue-400" />
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Saldo Wallet</p>
+                      <p className="text-sm font-black text-white">{user.walletAddress ? `${solBalance.toFixed(4)} SOL` : '0.0000 SOL'}</p>
+                    </div>
+                  </div>
+                  {user.walletAddress && (
+                    <div className="text-right">
+                      <p className="text-[9px] font-mono text-slate-600 truncate max-w-[100px]" title={user.walletAddress}>
+                        {user.walletAddress.slice(0, 4)}...{user.walletAddress.slice(-4)}
+                      </p>
+                      <div className="flex items-center justify-end gap-1 mt-0.5">
+                        <div className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                        <span className="text-[8px] font-bold text-emerald-500 uppercase">Devnet Online</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 <div className="p-5 bg-[#0f172a]/50 border border-slate-800 rounded-3xl flex items-start gap-4">
                   <ShieldCheck className="h-6 w-6 text-emerald-400 mt-1 flex-shrink-0" />
                   <div className="space-y-1">
                     <p className="text-[10px] font-bold text-white uppercase tracking-[0.2em]">Live {walletNetwork || 'Blockchain'} Bridge</p>
-                    <p className="text-xs text-slate-500 leading-relaxed font-medium">All financial contributions are anchored to the {walletNetwork || 'Blockchain'} Mainnet, ensuring immutable proof of assistance.</p>
+                    <p className="text-xs text-slate-500 leading-relaxed font-medium">All financial contributions are anchored to the {walletNetwork || 'Blockchain'} Devnet, ensuring immutable proof of assistance.</p>
                   </div>
                 </div>
 
@@ -243,6 +442,11 @@ export default function DonorDashboard({ user, walletConnected, walletNetwork, o
                   onClick={(e) => {
                     if (!walletConnected) {
                       e.preventDefault();
+                      setNotification({
+                        msg: 'Silakan hubungkan Crypto E-Wallet Anda terlebih dahulu.',
+                        type: 'error'
+                      });
+                      setTimeout(() => setNotification(null), 5000);
                       onConnect();
                     }
                   }}
@@ -264,7 +468,7 @@ export default function DonorDashboard({ user, walletConnected, walletNetwork, o
 
         {/* Goods Donation Form Section */}
         <div className="space-y-6">
-          <div className="bg-[#1e293b] rounded-[2.5rem] p-8 border border-slate-700/50 shadow-2xl overflow-hidden relative">
+          <div className="bg-[#1e293b] rounded-[2.5rem] p-8 border border-slate-700/50 shadow-2xl overflow-hidden relative min-h-full">
             <div className="absolute top-0 right-0 -mr-16 -mt-16 w-64 h-64 bg-emerald-600/10 rounded-full blur-3xl opacity-50" />
             
             <div className="relative z-10 h-full flex flex-col">
@@ -275,47 +479,55 @@ export default function DonorDashboard({ user, walletConnected, walletNetwork, o
                   </div>
                   <div>
                     <h2 className="text-3xl font-bold text-white tracking-tight">Donasi Barang</h2>
-                    <p className="text-slate-400 text-sm">Contribute logistics and physical supplies.</p>
+                    <p className="text-slate-400 text-sm">Transparency for logistics and physical supplies.</p>
                   </div>
                 </div>
-                <button 
-                  onClick={() => setShowGoodsForm(!showGoodsForm)}
-                  className="p-3 bg-slate-800 hover:bg-slate-700 rounded-full border border-slate-700 transition-colors"
-                >
-                  <Plus className={cn("h-6 w-6 text-white transition-transform", showGoodsForm && "rotate-45")} />
-                </button>
+                {!showGoodsForm && (
+                  <button 
+                    onClick={() => setShowGoodsForm(true)}
+                    className="p-4 bg-emerald-600 hover:bg-emerald-500 rounded-2xl border border-emerald-400/30 transition-all shadow-lg shadow-emerald-900/20 flex items-center gap-2 group"
+                  >
+                    <Plus className="h-5 w-5 text-white group-hover:rotate-90 transition-transform" />
+                    <span className="text-sm font-bold text-white">Buat Donasi</span>
+                  </button>
+                )}
               </div>
 
               {showGoodsForm ? (
                 <form onSubmit={handleDonateGoods} className="space-y-6">
                   <div className="space-y-4">
-                    <div>
-                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Nama Barang</label>
-                      <input 
-                        required 
-                        value={goodName} 
-                        onChange={e => setGoodName(e.target.value)}
-                        className="w-full px-4 py-4 bg-[#0f172a] border border-slate-800 rounded-xl text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
-                        placeholder="Misal: Beras, Selimut, Obat"
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid md:grid-cols-2 gap-4">
                       <div>
-                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Kategori</label>
+                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Nama Barang</label>
+                        <input 
+                          required 
+                          value={goodName} 
+                          onChange={e => setGoodName(e.target.value)}
+                          className="w-full px-4 py-4 bg-[#0f172a] border border-slate-800 rounded-xl text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all placeholder:text-slate-700 font-bold"
+                          placeholder="Misal: Beras Premium"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Kategori Barang</label>
                         <select 
                           value={category} 
                           onChange={e => setCategory(e.target.value)}
-                          className="w-full px-4 py-4 bg-[#0f172a] border border-slate-800 rounded-xl text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all appearance-none"
+                          className="w-full px-4 py-4 bg-[#0f172a] border border-slate-800 rounded-xl text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all appearance-none font-bold"
                         >
                           <option>Makanan</option>
+                          <option>Minuman</option>
+                          <option>Medis</option>
                           <option>Pakaian</option>
-                          <option>Kesehatan</option>
-                          <option>Perlengkapan</option>
+                          <option>Peralatan Darurat</option>
+                          <option>Logistik Umum</option>
                           <option>Lainnya</option>
                         </select>
                       </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
                       <div>
-                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Jumlah</label>
+                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Jumlah & Satuan</label>
                         <div className="flex gap-2">
                           <input 
                             type="number" 
@@ -323,35 +535,120 @@ export default function DonorDashboard({ user, walletConnected, walletNetwork, o
                             required
                             value={quantity} 
                             onChange={e => setQuantity(parseInt(e.target.value))}
-                            className="w-20 px-4 py-4 bg-[#0f172a] border border-slate-800 rounded-xl text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                            className="w-20 px-4 py-4 bg-[#0f172a] border border-slate-800 rounded-xl text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all font-bold"
                           />
-                          <input 
+                          <select 
                             required
                             value={unit} 
                             onChange={e => setUnit(e.target.value)}
-                            className="flex-1 px-4 py-4 bg-[#0f172a] border border-slate-800 rounded-xl text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all font-mono text-xs uppercase"
-                            placeholder="Unit (KG/BOX)"
-                          />
+                            className="flex-1 px-4 py-4 bg-[#0f172a] border border-slate-800 rounded-xl text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all font-bold appearance-none"
+                          >
+                            <option>Kg</option>
+                            <option>Liter</option>
+                            <option>Box</option>
+                            <option>Paket</option>
+                            <option>Pcs</option>
+                            <option>Karung</option>
+                            <option>Dus</option>
+                          </select>
                         </div>
                       </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Kondisi Barang</label>
+                        <select 
+                          value={condition} 
+                          onChange={e => setCondition(e.target.value)}
+                          className="w-full px-4 py-4 bg-[#0f172a] border border-slate-800 rounded-xl text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all appearance-none font-bold"
+                        >
+                          <option>Baru</option>
+                          <option>Layak Pakai</option>
+                          <option>Perlu Pemeriksaan</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Tujuan Bantuan / Posko</label>
+                      <select 
+                        value={destination} 
+                        onChange={e => setDestination(e.target.value)}
+                        className="w-full px-4 py-4 bg-[#0f172a] border border-slate-800 rounded-xl text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all appearance-none"
+                      >
+                        <option>Posko Utama - Jakarta</option>
+                        <option>Posko Bencana A - Jawa Barat</option>
+                        <option>Gudang Logistik Pusat</option>
+                        <option>Yayasan Kasih Bangsa</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Catatan Donatur (Opsional)</label>
+                      <textarea 
+                        value={notes} 
+                        onChange={e => setNotes(e.target.value)}
+                        className="w-full px-4 py-4 bg-[#0f172a] border border-slate-800 rounded-xl text-white focus:ring-2 focus:ring-emerald-500 outline-none transition-all h-20 resize-none"
+                        placeholder="Tambahkan detail jika diperlukan..."
+                      />
                     </div>
                   </div>
 
-                  <button
-                    type="submit"
-                    disabled={loading}
-                    className="w-full py-5 bg-emerald-600 text-white rounded-2xl font-black text-lg hover:bg-emerald-500 transition-all flex items-center justify-center gap-3 shadow-xl shadow-emerald-900/20"
-                  >
-                    {loading ? 'Processing...' : 'Kirim Donasi Barang'}
-                    <ArrowRight className="h-5 w-5" />
-                  </button>
+                  {/* Blockchain Proof Preview Card */}
+                  <div className="p-5 bg-blue-500/5 border border-blue-500/20 rounded-3xl space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <ShieldCheck className="h-4 w-4 text-blue-400" />
+                        <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">Blockchain Proof Preview</span>
+                      </div>
+                      <span className="px-2 py-0.5 bg-blue-500/20 text-blue-400 rounded text-[8px] font-bold uppercase">Devnet</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4 text-[9px] font-mono">
+                      <div className="space-y-1">
+                        <p className="text-slate-500 uppercase">Network</p>
+                        <p className="text-slate-300">Solana Devnet</p>
+                      </div>
+                      <div className="space-y-1 text-right">
+                        <p className="text-slate-500 uppercase">Record Type</p>
+                        <p className="text-slate-300">DONASI_BARANG</p>
+                      </div>
+                      <div className="space-y-1">
+                        <p className="text-slate-500 uppercase">Wallet Donor</p>
+                        <p className="text-slate-300">{user.walletAddress ? `${user.walletAddress.slice(0, 4)}...${user.walletAddress.slice(-4)}` : 'Not Connected'}</p>
+                      </div>
+                      <div className="space-y-1 text-right">
+                        <p className="text-slate-500 uppercase">Verifikasi</p>
+                        <p className="text-amber-400">Menunggu Admin</p>
+                      </div>
+                    </div>
+                    <p className="text-[8px] text-slate-500 leading-relaxed italic border-t border-blue-500/10 pt-2">
+                       Data donasi barang akan dicatat ke Solana sebagai memo transaction, lalu menunggu verifikasi admin.
+                    </p>
+                  </div>
+
+                  <div className="flex gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setShowGoodsForm(false)}
+                      className="px-6 py-5 bg-slate-800 text-slate-400 rounded-2xl font-bold hover:bg-slate-700 transition-all flex-shrink-0"
+                    >
+                      Batal
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={loading}
+                      className="flex-1 py-5 bg-emerald-600 text-white rounded-2xl font-black text-lg hover:bg-emerald-500 transition-all flex items-center justify-center gap-3 shadow-xl shadow-emerald-900/20 group"
+                    >
+                      {loading ? 'Anchoring to Chain...' : 'Kirim & Catat ke Blockchain →'}
+                      {!loading && <ArrowRight className="h-5 w-5 group-hover:translate-x-1 transition-transform" />}
+                    </button>
+                  </div>
                 </form>
               ) : (
-                <div className="flex-1 flex flex-col items-center justify-center py-8 text-center bg-[#0f172a]/30 rounded-3xl border border-dashed border-slate-800">
-                   <div className="p-4 bg-slate-800 rounded-full mb-4">
-                     <ClipboardList className="h-10 w-10 text-slate-500" />
+                <div className="flex-1 flex flex-col items-center justify-center py-8 text-center bg-[#0f172a]/30 rounded-3xl border border-dashed border-slate-700">
+                   <div className="p-6 bg-slate-800 rounded-3xl mb-4 shadow-xl">
+                     <ClipboardList className="h-12 w-12 text-emerald-500" />
                    </div>
-                   <p className="text-slate-400 font-medium px-8 leading-relaxed">Punya bantuan fisik untuk disalurkan? Tekan tombol plus untuk mendaftarkan barang donasi Anda ke sistem logistik blockchain kami.</p>
+                   <h4 className="text-white font-bold mb-2">Belum ada donasi aktif</h4>
+                   <p className="text-slate-400 text-xs px-12 leading-relaxed font-medium">Punya bantuan fisik untuk disalurkan? Klik tombol disamping untuk mendaftarkan barang donasi Anda ke sistem logistik blockchain kami untuk transparansi penuh.</p>
                 </div>
               )}
             </div>
@@ -411,22 +708,38 @@ export default function DonorDashboard({ user, walletConnected, walletNetwork, o
                 <div key={item.id} className="p-6 rounded-3xl border border-slate-800 bg-[#0f172a]/50 hover:bg-[#0f172a] transition-all group">
                   <div className="flex justify-between items-start mb-2">
                     <div className="">
-                      <h4 className="font-bold text-slate-200">{item.name}</h4>
-                      <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">{item.category} • {item.quantity} {item.unit}</p>
+                      <h4 className="font-bold text-slate-200">{item.itemName}</h4>
+                      <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">{item.category} • {item.quantity} {item.unit} • {item.condition}</p>
+                      <p className="text-[9px] font-bold text-emerald-500/80 uppercase tracking-tighter mt-0.5">Tujuan: {item.destination}</p>
                     </div>
                     <span className={cn(
-                      "px-2 py-1 rounded text-[8px] font-bold uppercase tracking-widest border",
-                      item.status === LogisticStatus.DELIVERED ? "border-emerald-500 text-emerald-500" : 
-                      item.status === LogisticStatus.PICKED_UP ? "border-purple-500 text-purple-500" :
-                      item.status === LogisticStatus.IN_TRANSIT ? "border-amber-500 text-amber-500" :
-                      "border-blue-500 text-blue-500"
+                      "px-2 py-1 rounded text-[8px] font-black uppercase tracking-widest border",
+                      item.verificationStatus === "PENDING" ? "border-amber-500/30 bg-amber-500/10 text-amber-500" :
+                      item.verificationStatus === "REJECTED" ? "border-red-500/30 bg-red-500/10 text-red-500" :
+                      item.status === LogisticStatus.DELIVERED || item.status === "Selesai Disalurkan" ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-500" : 
+                      item.status === LogisticStatus.IN_GUDANG ? "border-blue-500/30 bg-blue-500/10 text-blue-500" :
+                      item.status === LogisticStatus.PICKED_UP ? "border-purple-500/30 bg-purple-500/10 text-purple-500" :
+                      "border-slate-500/30 bg-slate-500/10 text-slate-500"
                     )}>
                       {item.status}
                     </span>
                   </div>
                   <div className="mt-3 pt-3 border-t border-slate-800/50 flex justify-between items-center">
-                    <code className="text-[9px] font-mono text-slate-600">QR: {item.qrcode}</code>
-                    <span className="text-[9px] font-mono text-slate-600">{format(item.createdAt, 'dd MMM yyyy')}</span>
+                    <div className="flex flex-col gap-1">
+                      <code className="text-[9px] font-mono text-slate-600">QR: {item.qrcode}</code>
+                      {(item.transactionHash || (item as any).lastTxHash) && (
+                        <a 
+                          href={getExplorerUrl(item.transactionHash || (item as any).lastTxHash, (item.network || (item as any).lastTxNetwork || BlockchainNetwork.SOLANA) as BlockchainNetwork)} 
+                          target="_blank" 
+                          rel="noreferrer"
+                          className="text-[8px] font-mono text-blue-500/50 hover:text-blue-400 truncate max-w-[150px] flex items-center gap-1"
+                        >
+                          Hash: {(item.transactionHash || (item as any).lastTxHash).slice(0, 8)}...
+                          <ExternalLink className="h-2 w-2" />
+                        </a>
+                      )}
+                    </div>
+                    <span className="text-[9px] font-mono text-slate-600">{format(new Date(item.createdAt), 'dd MMM yyyy')}</span>
                   </div>
                 </div>
               ))

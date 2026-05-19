@@ -38,6 +38,32 @@ export default function App() {
   const [welcomeNote, setWelcomeNote] = useState<string | null>(null);
 
   useEffect(() => {
+    // System Reset - One time clearance of old goods database as requested
+    const DB_VERSION = 'v3.0.0';
+    const currentVersion = localStorage.getItem('siagabantu_db_version');
+
+    if (currentVersion !== DB_VERSION) {
+      console.log('Performing system reset to clear old goods database...');
+      const keysToRemove = [
+        "goodsDonations",
+        "logistics",
+        "pendingGoodsDonations",
+        "distributionLedger",
+        "inventoryLedger",
+        "warehouseItems",
+        "volunteerDeliveries",
+        "publicGoodsTracking",
+        "oldLogistics",
+        "goodsDatabase"
+      ];
+      
+      keysToRemove.forEach(key => localStorage.removeItem(key));
+      
+      localStorage.setItem('siagabantu_db_version', DB_VERSION);
+    }
+  }, []);
+
+  useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
         try {

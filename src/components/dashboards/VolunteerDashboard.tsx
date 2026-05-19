@@ -26,41 +26,44 @@ export default function VolunteerDashboard({ user, walletConnected, walletNetwor
   const scannerRef = useRef<Html5QrcodeScanner | null>(null);
 
   useEffect(() => {
-    // Show tasks assigned to me or goods in transit that need delivery
-    const q = query(collection(db, 'goods'), where('status', '!=', LogisticStatus.DELIVERED));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const items: Goods[] = [];
-      snapshot.forEach((doc) => {
-        items.push({ id: doc.id, ...doc.data() } as Goods);
-      });
-      setTasks(items);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'goods');
-    });
+    // Load logistics from localStorage for real-time consistency
+    const loadLogistics = () => {
+      const savedLogistics = localStorage.getItem("logistics");
+      if (savedLogistics) {
+        const allLogistics = JSON.parse(savedLogistics) as Goods[];
+        
+        // Active tasks: Items ready for pickup or in transit
+        const active = allLogistics.filter(item => 
+          (item.status === LogisticStatus.READY_FOR_PICKUP || 
+           item.status === LogisticStatus.PICKED_UP) &&
+          (!item.assignedVolunteer || item.assignedVolunteer === user.displayName || item.deliveredBy === user.uid)
+        );
+        setTasks(active);
 
-    return () => unsubscribe();
-  }, [user.uid]);
+        // History: Items delivered by this volunteer
+        const history = allLogistics.filter(item => 
+          (item.status === LogisticStatus.DELIVERED || item.status === "Selesai Disalurkan") && 
+          (item.deliveredBy === user.uid || (item as any).volunteerId === user.uid)
+        );
+        setHistoryTasks(history.sort((a, b) => {
+          const timeA = new Date(a.updatedAt || 0).getTime();
+          const timeB = new Date(b.updatedAt || 0).getTime();
+          return timeB - timeA;
+        }));
+      }
+    };
 
-  useEffect(() => {
-    // Fetch completed/history tasks for this volunteer
-    const q = query(
-      collection(db, 'goods'), 
-      where('status', '==', LogisticStatus.DELIVERED),
-      where('volunteerId', '==', user.uid)
-    );
+    loadLogistics();
     
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const items: Goods[] = [];
-      snapshot.forEach((doc) => {
-        items.push({ id: doc.id, ...doc.data() } as Goods);
-      });
-      setHistoryTasks(items.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'goods');
-    });
+    // Polling or listener for localStorage changes across tabs
+    window.addEventListener('storage', loadLogistics);
+    const interval = setInterval(loadLogistics, 3000);
 
-    return () => unsubscribe();
-  }, [user.uid]);
+    return () => {
+      window.removeEventListener('storage', loadLogistics);
+      clearInterval(interval);
+    };
+  }, [user.uid, user.displayName]);
 
   const startScanner = () => {
     setScanning(true);
@@ -84,62 +87,77 @@ export default function VolunteerDashboard({ user, walletConnected, walletNetwor
     setScanning(false);
   };
 
-  const updateGoodsStatus = async (goodsId: string, currentStatus: LogisticStatus) => {
+  const updateGoodsStatus = async (goodsId: string, currentStatus: LogisticStatus | string, targetStatus?: LogisticStatus | string) => {
     setTxProgress('Memproses transisi status...');
     
     try {
-      // Determine next status
-      let nextStatus = LogisticStatus.PICKED_UP;
-      if (currentStatus === LogisticStatus.IN_GUDANG) nextStatus = LogisticStatus.PICKED_UP;
-      if (currentStatus === LogisticStatus.PICKED_UP) nextStatus = LogisticStatus.IN_TRANSIT;
-      if (currentStatus === LogisticStatus.IN_TRANSIT) nextStatus = LogisticStatus.DELIVERED;
+      // Determine next status if not explicitly provided
+      let nextStatus = targetStatus;
+      
+      if (!nextStatus) {
+        if (currentStatus === LogisticStatus.READY_FOR_PICKUP || currentStatus === "Siap Dijemput") nextStatus = LogisticStatus.PICKED_UP;
+        else if (currentStatus === LogisticStatus.PICKED_UP || currentStatus === "Dalam Pengiriman") nextStatus = LogisticStatus.DELIVERED;
+        else nextStatus = LogisticStatus.PICKED_UP;
+      }
 
-      if (currentStatus === LogisticStatus.DELIVERED) {
+      if (currentStatus === LogisticStatus.DELIVERED || currentStatus === "Selesai Disalurkan") {
          setScanStatus({ type: 'error', message: 'Aset sudah mencapai destinasi akhir.' });
          setTxProgress(null);
          return;
       }
 
-      // Real or Simulation of Web3 Tx
-      setTxProgress(`Broadcasting status ${nextStatus} ke ${walletNetwork || 'Blockchain'}...`);
-      
-      let hash = '';
-      if (walletNetwork === BlockchainNetwork.SOLANA && user.walletAddress) {
-        try {
-          // Attempt real transaction signing if Phantom is active
-          hash = await sendSolanaTransaction(user.walletAddress);
-        } catch (e) {
-          console.warn('Real transaction failed or cancelled, using simulation fallback:', e);
-          hash = generateTxHash(walletNetwork || BlockchainNetwork.SOLANA);
-        }
-      } else {
-        hash = generateTxHash(walletNetwork || BlockchainNetwork.SOLANA);
+      // Update Database
+      const savedLogistics = localStorage.getItem("logistics");
+      if (savedLogistics) {
+        const allLogistics = JSON.parse(savedLogistics) as Goods[];
+        const updatedLogistics = allLogistics.map(item => {
+          if (String(item.id) === String(goodsId)) {
+            return {
+              ...item,
+              status: nextStatus,
+              assignedVolunteer: user.displayName || 'Relawan',
+              deliveryStatus: nextStatus === LogisticStatus.DELIVERED ? "Sudah Terkirim" : "Diproses Relawan",
+              updatedAt: new Date().toISOString(),
+              deliveredBy: nextStatus === LogisticStatus.DELIVERED ? user.uid : item.deliveredBy,
+              deliveredAt: nextStatus === LogisticStatus.DELIVERED ? new Date().toISOString() : item.deliveredAt
+            };
+          }
+          return item;
+        });
+
+        localStorage.setItem("logistics", JSON.stringify(updatedLogistics));
+        // Also update local states
+        setTasks(updatedLogistics.filter(item => 
+          (item.status === LogisticStatus.READY_FOR_PICKUP || item.status === LogisticStatus.PICKED_UP)
+        ));
       }
 
-      // Update Database
-      await updateDoc(doc(db, 'goods', goodsId), {
-        status: nextStatus,
-        volunteerId: user.uid,
-        lastTxHash: hash,
-        lastTxNetwork: walletNetwork || BlockchainNetwork.SOLANA,
-        updatedAt: Date.now()
-      });
+      // Firestore update as backup (will likely fail due to permissions, which is expected/handled)
+      try {
+        await updateDoc(doc(db, 'goods', goodsId), {
+          status: nextStatus,
+          volunteerId: user.uid,
+          volunteerName: user.displayName || 'Relawan',
+          updatedAt: new Date().toISOString()
+        });
+      } catch (fe) {
+        console.warn("Firestore update skipped - strictly using system unified database.");
+      }
 
       setScanStatus({ 
         type: 'success', 
-        message: `Status diupdate ke ${nextStatus}. Tx: ${hash.slice(0, 12)}...` 
+        message: `Status diupdate ke ${nextStatus}.` 
       });
 
+      const itemName = tasks.find(t => String(t.id) === String(goodsId))?.itemName || "Barang";
       setNotification({
-        msg: `Barang "${tasks.find(t => t.id === goodsId)?.name || 'Barang'}" berhasil diproses ke ${nextStatus}!`,
+        msg: `Barang "${itemName}" berhasil diproses ke ${nextStatus}!`,
         type: 'success'
       });
       
-      // Auto-clear notification
       setTimeout(() => setNotification(null), 5000);
 
     } catch (error: any) {
-      handleFirestoreError(error, OperationType.UPDATE, 'goods');
       setNotification({
         msg: `Gagal update status: ${error.message || 'Error tidak diketahui'}`,
         type: 'error'
@@ -154,23 +172,26 @@ export default function VolunteerDashboard({ user, walletConnected, walletNetwor
     setTxProgress('Memvalidasi QR Code...');
     
     try {
-      // Find goods with this QR
-      const q = query(collection(db, 'goods'), where('qrcode', '==', decodedText));
-      const querySnapshot = await getDocs(q);
+      const savedLogistics = localStorage.getItem("logistics");
+      if (!savedLogistics) {
+        setScanStatus({ type: 'error', message: 'Database logistik kosong.' });
+        setTxProgress(null);
+        return;
+      }
+
+      const allLogistics = JSON.parse(savedLogistics) as Goods[];
+      const item = allLogistics.find(g => g.qrcode === decodedText);
       
-      if (querySnapshot.empty) {
+      if (!item) {
         setScanStatus({ type: 'error', message: 'Barang tidak ditemukan di sistem! Periksa validitas QR.' });
         setTxProgress(null);
         return;
       }
 
-      const goodsId = querySnapshot.docs[0].id;
-      const goodsData = querySnapshot.docs[0].data() as Goods;
-      
-      await updateGoodsStatus(goodsId, goodsData.status);
+      await updateGoodsStatus(String(item.id), item.status as LogisticStatus);
 
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, 'goods');
+      console.error("Scan error:", error);
     }
   };
 
@@ -379,47 +400,77 @@ export default function VolunteerDashboard({ user, walletConnected, walletNetwor
                 </div>
                 <StatusBadge status={item.status} />
               </div>
-              <h4 className="font-bold text-slate-200 text-xl mb-1 tracking-tight group-hover:text-blue-400 transition-colors">{item.name}</h4>
-              <div className="flex flex-wrap items-center gap-2">
+              <h4 className="font-bold text-slate-200 text-xl mb-1 tracking-tight group-hover:text-blue-400 transition-colors uppercase italic">{item.itemName}</h4>
+              <div className="flex flex-wrap items-center gap-2 mb-3">
                 <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">{item.category} • {item.quantity} {item.unit}</p>
-                {item.donorId && (
+                {item.condition && (
+                  <span className="text-[8px] font-bold text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded border border-slate-800 uppercase">
+                    {item.condition}
+                  </span>
+                )}
+                {(item.donorName || item.donorId) && (
                   <span className="text-[8px] font-bold text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded border border-blue-500/20 uppercase tracking-[0.05em]">
                     Donatur: {item.donorName || 'Anonim'}
                   </span>
                 )}
               </div>
               
-              <div className="mt-6 pt-6 border-t border-slate-800/50 space-y-6">
-                <div className="flex items-center justify-between">
+              {item.destination && (
+                <div className="bg-[#0f172a] p-3 rounded-xl border border-slate-800/50 mb-4 flex items-start gap-3">
+                  <MapPin className="h-4 w-4 text-red-500 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <p className="text-[9px] font-bold text-slate-600 uppercase tracking-widest leading-none">Target Koordinat</p>
+                    <p className="text-[11px] font-bold text-slate-300 leading-tight">{item.destination}</p>
+                  </div>
+                </div>
+              )}
+                           {/* Manual Action Buttons */}
+                <div className="flex flex-col gap-3 mt-6 pt-6 border-t border-slate-800/50">
+                  {!walletConnected ? (
+                    <button 
+                      onClick={onConnect}
+                      className="w-full py-4 bg-red-600/10 border border-red-500/20 rounded-2xl text-xs text-red-400 hover:bg-red-600 hover:text-white transition-all uppercase tracking-widest font-black cursor-pointer flex items-center justify-center gap-2"
+                    >
+                      <Wallet className="h-4 w-4" /> Hubungkan Dompet
+                    </button>
+                  ) : (
+                    <div className="space-y-3">
+                      {item.status === LogisticStatus.READY_FOR_PICKUP && (
+                        <button
+                          onClick={() => updateGoodsStatus(item.id, item.status, LogisticStatus.PICKED_UP)}
+                          disabled={!!txProgress}
+                          className="w-full py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl font-bold text-xs uppercase tracking-widest flex items-center justify-center gap-3 transition-all cursor-pointer shadow-lg shadow-blue-600/20"
+                        >
+                          <Package className="h-4 w-4" />
+                          Ambil Barang & Antar
+                          <ArrowRight className="h-4 w-4" />
+                        </button>
+                      )}
+
+                      {item.status === LogisticStatus.PICKED_UP && (
+                        <button
+                          onClick={() => updateGoodsStatus(item.id, item.status, LogisticStatus.DELIVERED)}
+                          disabled={!!txProgress}
+                          className="w-full py-4 bg-emerald-600 hover:bg-emerald-500 text-white rounded-2xl font-bold text-xs uppercase tracking-widest flex items-center justify-center gap-3 transition-all cursor-pointer shadow-lg shadow-emerald-600/20"
+                        >
+                          <CheckCircle className="h-4 w-4" />
+                          Selesaikan Pengiriman
+                          <ArrowRight className="h-4 w-4" />
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between mt-6">
                   <span className="text-[10px] font-bold text-slate-600 uppercase tracking-widest">QR Identifier</span>
                   <code className="text-[10px] font-mono text-blue-500 bg-blue-500/5 px-2 py-0.5 rounded">{item.qrcode}</code>
                 </div>
 
-                {/* Manual Action Button */}
-                <button
-                  onClick={() => {
-                    if (!walletConnected) {
-                      onConnect();
-                    } else {
-                      updateGoodsStatus(item.id, item.status);
-                    }
-                  }}
-                  disabled={!!txProgress}
-                  className={cn(
-                    "w-full py-4 rounded-2xl font-bold text-xs uppercase tracking-widest flex items-center justify-center gap-3 transition-all",
-                    walletConnected
-                      ? "bg-blue-600/10 text-blue-400 border border-blue-500/20 hover:bg-blue-600 hover:text-white"
-                      : "bg-[#0f172a] text-blue-400 border border-blue-500/30 hover:bg-blue-500/10"
-                  )}
-                >
-                  <Truck className="h-4 w-4" />
-                  {walletConnected ? `Update via ${walletNetwork}` : 'Hubungkan Crypto E-Wallet'}
-                  <ArrowRight className="h-4 w-4" />
-                </button>
-
-                {item.lastTxHash ? (
-                  <a 
-                    href={getExplorerUrl(item.lastTxHash, item.lastTxNetwork || walletNetwork || BlockchainNetwork.SOLANA)} 
+                <div className="mt-4">
+                  {item.transactionHash || (item as any).lastTxHash ? (
+                    <a 
+                    href={getExplorerUrl(item.transactionHash || (item as any).lastTxHash, (item.network || (item as any).lastTxNetwork || BlockchainNetwork.SOLANA) as BlockchainNetwork)} 
                     target="_blank" 
                     rel="noreferrer"
                     className="text-[9px] font-mono text-slate-500 hover:text-blue-400 transition-colors flex flex-col gap-1.5"
@@ -429,7 +480,7 @@ export default function VolunteerDashboard({ user, walletConnected, walletNetwor
                       <ExternalLink className="h-3 w-3" />
                     </div>
                     <span className="truncate block bg-[#0f172a] p-2 rounded-lg border border-slate-800 group-hover:border-blue-900/30">
-                      {item.lastTxHash}
+                      {item.transactionHash || (item as any).lastTxHash}
                     </span>
                   </a>
                 ) : (
@@ -482,7 +533,7 @@ export default function VolunteerDashboard({ user, walletConnected, walletNetwor
                 <tbody className="divide-y divide-slate-800">
                   {historyTasks.map((item) => (
                     <tr key={item.id} className="group hover:bg-slate-800/30 transition-colors">
-                      <td className="py-5 pl-2 font-bold text-slate-200">{item.name}</td>
+                      <td className="py-5 pl-2 font-bold text-slate-200">{item.itemName}</td>
                       <td className="py-5 pl-2">
                         <span className="text-[10px] font-bold text-slate-500 bg-slate-900/50 px-2 py-1 rounded border border-slate-800">
                           {item.category}
@@ -490,17 +541,17 @@ export default function VolunteerDashboard({ user, walletConnected, walletNetwor
                       </td>
                       <td className="py-5 pl-2 text-slate-400 text-sm">{item.quantity} {item.unit}</td>
                       <td className="py-5 pl-2 text-slate-400 text-xs">
-                        {item.updatedAt ? format(item.updatedAt, 'dd MMM yyyy HH:mm') : 'N/A'}
+                        {item.updatedAt ? format(new Date(item.updatedAt), 'dd MMM yyyy HH:mm') : 'N/A'}
                       </td>
                       <td className="py-5 text-right pr-2">
-                        {item.lastTxHash ? (
+                        {(item.transactionHash || (item as any).lastTxHash) ? (
                           <a 
-                            href={getExplorerUrl(item.lastTxHash, item.lastTxNetwork || walletNetwork || BlockchainNetwork.SOLANA)} 
+                            href={getExplorerUrl(item.transactionHash || (item as any).lastTxHash, (item.network || (item as any).lastTxNetwork || BlockchainNetwork.SOLANA) as BlockchainNetwork)} 
                             target="_blank" 
                             rel="noreferrer"
                             className="bg-blue-600/10 hover:bg-blue-600 text-blue-400 hover:text-white px-3 py-1.5 rounded-lg text-[10px] font-mono transition-all inline-flex items-center gap-2 border border-blue-500/20"
                           >
-                            {item.lastTxHash.slice(0, 6)}...{item.lastTxHash.slice(-4)}
+                            {(item.transactionHash || (item as any).lastTxHash).slice(0, 6)}...{(item.transactionHash || (item as any).lastTxHash).slice(-4)}
                             <ExternalLink className="h-3 w-3" />
                           </a>
                         ) : (
@@ -519,18 +570,20 @@ export default function VolunteerDashboard({ user, walletConnected, walletNetwor
   );
 }
 
-function StatusBadge({ status }: { status: LogisticStatus }) {
-  const styles = {
+function StatusBadge({ status }: { status: LogisticStatus | string }) {
+  const styles: Record<string, string> = {
+    [LogisticStatus.PENDING_ADMIN]: "bg-slate-500/10 text-slate-400 border-slate-500/20",
     [LogisticStatus.IN_GUDANG]: "bg-blue-500/10 text-blue-400 border-blue-500/20",
     [LogisticStatus.IN_TRANSIT]: "bg-amber-500/10 text-amber-400 border-amber-500/20",
     [LogisticStatus.DELIVERED]: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
     [LogisticStatus.PICKED_UP]: "bg-purple-500/10 text-purple-400 border-purple-500/20",
+    [LogisticStatus.REJECTED]: "bg-red-500/10 text-red-500 border-red-500/20",
   };
 
   return (
     <span className={cn(
-      "px-3 py-1 rounded-full text-[9px] font-bold uppercase tracking-widest border",
-      styles[status]
+      "px-3 py-1 rounded-full text-[9px] font-bold uppercase tracking-widest border shrink-0",
+      styles[status] || "bg-slate-500/10 text-slate-500 border-slate-500/20"
     )}>
       {status}
     </span>

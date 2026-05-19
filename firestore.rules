@@ -17,7 +17,9 @@ service cloud.firestore {
     }
 
     function hasRole(role) {
-      return isSignedIn() && getUserRole() == role;
+      return isSignedIn() && 
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+             getUserRole() == role;
     }
 
     function isValidId(id) {
@@ -43,7 +45,12 @@ service cloud.firestore {
       allow create: if hasRole('GUDANG') || hasRole('ADMIN') || hasRole('DONATUR');
       allow update: if isSignedIn() && (
         hasRole('GUDANG') || hasRole('ADMIN') || 
-        (hasRole('RELAWAN') && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'volunteerId', 'updatedAt', 'lastTxHash']))
+        (hasRole('RELAWAN') && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'qrcode', 'name', 'category', 'quantity', 'unit', 'warehouseId', 'donorId', 'donorName', 'createdAt', 'source', 'notes'
+        ])) ||
+        (hasRole('DONATUR') && request.auth.uid == resource.data.donorId && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'qrcode', 'volunteerId', 'volunteerName', 'warehouseId', 'status'
+        ]))
       );
       allow delete: if hasRole('ADMIN');
     }
@@ -54,6 +61,32 @@ service cloud.firestore {
       allow create: if isSignedIn(); // Donors create their own donation records
       allow update: if false; // Donations are immutable
       allow delete: if false;
+    }
+
+    // Fund Usage: Any user can read, but only Admin can write
+    match /fundUsage/{usageId} {
+      allow read: if true;
+      allow create: if hasRole('ADMIN');
+      allow update: if hasRole('ADMIN');
+      allow delete: if hasRole('ADMIN');
+    }
+
+    // Logistics: Public read, Admin/Gudang write
+    match /logistics/{logId} {
+      allow read: if true;
+      allow create, update, delete: if hasRole('ADMIN') || hasRole('GUDANG');
+    }
+
+    // Admin Ledger / Transactions: Admin only
+    match /adminLedger/{id} {
+      allow read, write: if hasRole('ADMIN');
+    }
+    match /transactions/{id} {
+      allow read, write: if hasRole('ADMIN');
+    }
+    match /disasterFunds/{id} {
+      allow read: if true;
+      allow write: if hasRole('ADMIN');
     }
 
     // Default deny

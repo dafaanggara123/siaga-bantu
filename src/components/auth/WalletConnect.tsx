@@ -13,7 +13,7 @@ interface WalletConnectProps {
 export const NETWORKS = [
   { 
     id: BlockchainNetwork.SOLANA, 
-    name: 'Solana', 
+    name: 'Solana Devnet', 
     icon: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/info/logo.png', 
     color: 'text-purple-400', 
     banner: 'bg-purple-500/10' 
@@ -231,6 +231,11 @@ export default function WalletConnect({ isOpen, onClose, onConnect }: WalletConn
                       <h4 className="text-[10px] font-bold text-blue-400 uppercase tracking-[0.2em] mb-1">Authenticated Bridge</h4>
                       <p className="text-xs text-slate-400 leading-relaxed font-medium">
                         Financial assistance recorded on the <span className="text-white">{NETWORKS.find(n => n.id === selectedNetwork)?.name} Protocol</span> provides radical transparency and immutable proof.
+                        {selectedNetwork === BlockchainNetwork.SOLANA && (
+                          <span className="block mt-2 text-amber-400/80 text-[10px] uppercase font-bold italic">
+                            * Pastikan Dompet Phantom Anda berada di Network Devnet
+                          </span>
+                        )}
                       </p>
                     </div>
                   </div>

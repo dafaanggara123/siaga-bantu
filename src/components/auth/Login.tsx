@@ -144,7 +144,7 @@ export default function Login({ onPublicTracking }: LoginProps) {
         <div className="flex gap-8 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
           <span>Off-Chain Data</span>
           <span className="text-slate-800">•</span>
-          <span>Solana Mainnet</span>
+          <span>Solana Devnet</span>
           <span className="text-slate-800">•</span>
           <span>QR Verification</span>
         </div>
