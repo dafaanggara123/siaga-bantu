@@ -572,12 +572,12 @@ export default function VolunteerDashboard({ user, walletConnected, walletNetwor
 
 function StatusBadge({ status }: { status: LogisticStatus | string }) {
   const styles: Record<string, string> = {
-    [LogisticStatus.PENDING_ADMIN]: "bg-slate-500/10 text-slate-400 border-slate-500/20",
-    [LogisticStatus.IN_GUDANG]: "bg-blue-500/10 text-blue-400 border-blue-500/20",
-    [LogisticStatus.IN_TRANSIT]: "bg-amber-500/10 text-amber-400 border-amber-500/20",
-    [LogisticStatus.DELIVERED]: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
-    [LogisticStatus.PICKED_UP]: "bg-purple-500/10 text-purple-400 border-purple-500/20",
-    [LogisticStatus.REJECTED]: "bg-red-500/10 text-red-500 border-red-500/20",
+    'Menunggu Verifikasi': "bg-slate-500/10 text-slate-400 border-slate-500/20",
+    'Di Gudang': "bg-blue-500/10 text-blue-400 border-blue-500/20",
+    'Siap Dijemput': "bg-amber-500/10 text-amber-500 border-amber-500/20",
+    'Dalam Pengiriman': "bg-purple-500/10 text-purple-400 border-purple-500/20",
+    'Selesai Disalurkan': "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
+    'Ditolak': "bg-red-500/10 text-red-500 border-red-500/20",
   };
 
   return (

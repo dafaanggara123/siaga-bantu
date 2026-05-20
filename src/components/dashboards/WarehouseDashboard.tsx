@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { collection, addDoc, query, where, onSnapshot, getDocs, updateDoc } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../../firebase';
-import { UserProfile, Goods, LogisticStatus, BlockchainNetwork } from '../../types';
-import { Package, Plus, QrCode, ClipboardList, Warehouse, History, ArrowRight, CheckCircle, Info, Scan, Camera, ArrowUpRight, Search, MapPin } from 'lucide-react';
+import { UserProfile, Goods, LogisticStatus, BlockchainNetwork, FundUsage } from '../../types';
+import { Package, QrCode, ClipboardList, Warehouse, History, ArrowRight, CheckCircle, Info, Scan, Camera, ArrowUpRight, Search, MapPin } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { Html5QrcodeScanner } from 'html5-qrcode';
 import { motion, AnimatePresence } from 'motion/react';
@@ -18,18 +18,10 @@ interface WarehouseDashboardProps {
 
 export default function WarehouseDashboard({ user, walletConnected, walletNetwork, onConnect }: WarehouseDashboardProps) {
   const [goods, setGoods] = useState<Goods[]>([]);
-  const [showAddForm, setShowAddForm] = useState(false);
   const [loading, setLoading] = useState(false);
   const [notification, setNotification] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
   const [scanning, setScanning] = useState(false);
   const scannerRef = React.useRef<Html5QrcodeScanner | null>(null);
-  
-  // Form State
-  const [name, setName] = useState('');
-  const [category, setCategory] = useState('Makanan');
-  const [quantity, setQuantity] = useState(1);
-  const [unit, setUnit] = useState('Box');
-
   const [searchTerm, setSearchTerm] = useState('');
 
   useEffect(() => {
@@ -38,8 +30,8 @@ export default function WarehouseDashboard({ user, walletConnected, walletNetwor
       if (savedLogistics) {
         const allLogistics = JSON.parse(savedLogistics) as Goods[];
         setGoods(allLogistics.sort((a, b) => {
-          const timeA = new Date(a.updatedAt || 0).getTime();
-          const timeB = new Date(b.updatedAt || 0).getTime();
+          const timeA = new Date(a.updatedAt || a.createdAt || 0).getTime();
+          const timeB = new Date(b.updatedAt || b.createdAt || 0).getTime();
           return timeB - timeA;
         }));
       }
@@ -47,6 +39,66 @@ export default function WarehouseDashboard({ user, walletConnected, walletNetwor
 
     loadLogistics();
     
+    // Subscribe to fundUsage to sync older purchased logistics
+    const unsubscribeUsage = onSnapshot(collection(db, 'fundUsage'), (snapshot) => {
+      const items: FundUsage[] = [];
+      snapshot.forEach((doc) => items.push({ id: doc.id, ...doc.data() } as FundUsage));
+      
+      const purchaseItems = items.filter(f => f.usageType === 'Pembelian Logistik');
+      if (purchaseItems.length > 0) {
+        const savedLogistics = localStorage.getItem("logistics");
+        const currentLogistics: Goods[] = savedLogistics ? JSON.parse(savedLogistics) : [];
+        let hasChanges = false;
+
+        purchaseItems.forEach(fund => {
+          const isAlreadyRegistered = currentLogistics.some(item => 
+            (item.id === `GOOD-PURCHASE-${fund.id}`) ||
+            (fund.transactionHash && item.transactionHash === fund.transactionHash) ||
+            (item.itemName === (fund.purpose || `Pembelian Logistik: ${fund.category}`) && item.donorWallet === fund.adminWallet)
+          );
+
+          if (!isAlreadyRegistered) {
+            const itemQrcode = `SB-PUR-${Math.floor(Math.random() * 900000 + 100000)}`;
+            const purchasedGoods: Goods = {
+              id: `GOOD-PURCHASE-${fund.id}`,
+              uid: `GOOD-PURCHASE-${fund.id}`,
+              itemName: fund.purpose || `Pembelian Logistik: ${fund.category}`,
+              category: fund.category,
+              quantity: 1,
+              unit: "Paket",
+              condition: "Baru",
+              destination: fund.recipient || "Posko Utama",
+              source: "Pembelian Admin (Dana Bantuan)",
+              status: LogisticStatus.IN_GUDANG,
+              warehouseId: "", 
+              note: fund.note || `Dibeli oleh Admin menggunakan Dana Bantuan. Harap petugas gudang segera menyiapkan paket logistik ini untuk tujuan: ${fund.recipient}.`,
+              qrcode: itemQrcode,
+              donorWallet: fund.adminWallet || "",
+              donorName: `Admin`,
+              transactionHash: fund.transactionHash,
+              network: fund.network || "Solana Devnet",
+              verificationStatus: "APPROVED",
+              currentLocation: "Gudang Logistik",
+              warehouseStatus: "Menunggu Persiapan Gudang",
+              deliveryStatus: "Belum Dikirim",
+              assignedVolunteer: "",
+              createdAt: new Date(fund.createdAt || Date.now()).toISOString(),
+              updatedAt: new Date(fund.createdAt || Date.now()).toISOString(),
+              verifiedAt: new Date(fund.createdAt || Date.now()).toISOString(),
+              verifiedBy: "Admin",
+            };
+            currentLogistics.unshift(purchasedGoods);
+            hasChanges = true;
+          }
+        });
+
+        if (hasChanges) {
+          localStorage.setItem("logistics", JSON.stringify(currentLogistics));
+          loadLogistics();
+        }
+      }
+    }, (error) => handleFirestoreError(error, OperationType.LIST, 'fundUsage'));
+
     // Polling and events for synchronicity across dashboard roles
     window.addEventListener('storage', loadLogistics);
     const interval = setInterval(loadLogistics, 3000);
@@ -54,6 +106,7 @@ export default function WarehouseDashboard({ user, walletConnected, walletNetwor
     return () => {
       window.removeEventListener('storage', loadLogistics);
       clearInterval(interval);
+      unsubscribeUsage();
     };
   }, []);
 
@@ -80,9 +133,35 @@ export default function WarehouseDashboard({ user, walletConnected, walletNetwor
     setTimeout(() => setNotification(null), 5000);
   };
 
-  const filteredGoods = goods.filter(g => 
-    (g.itemName || (g as any).name || "").toLowerCase().includes(searchTerm.toLowerCase()) || 
-    g.qrcode.toLowerCase().includes(searchTerm.toLowerCase())
+  const warehouseItems = goods.filter(
+    item =>
+      item.verificationStatus === "APPROVED" &&
+      (
+        item.status === "Di Gudang" ||
+        item.status === "Siap Dikirim" ||
+        item.status === "Siap Dijemput" ||
+        item.status === "Dalam Pengiriman" ||
+        item.status === "Selesai Disalurkan"
+      )
+  );
+
+  const totalStok = warehouseItems.length;
+
+  const stokDiGudang = warehouseItems.filter(
+    item => item.status === "Di Gudang"
+  ).length;
+
+  const siapDikirim = warehouseItems.filter(
+    item => item.status === "Siap Dikirim" || item.status === "Siap Dijemput"
+  ).length;
+
+  const sudahDistribusi = warehouseItems.filter(
+    item => item.status === "Selesai Disalurkan"
+  ).length;
+
+  const filteredWarehouseItems = warehouseItems.filter(g => 
+    (g.itemName || (g as any).name || "").toLowerCase().includes((searchTerm || "").toLowerCase()) || 
+    (g.qrcode || "").toLowerCase().includes((searchTerm || "").toLowerCase())
   );
 
   const onScanSuccess = async (decodedText: string) => {
@@ -149,59 +228,7 @@ export default function WarehouseDashboard({ user, walletConnected, walletNetwor
     setTimeout(() => setNotification(null), 5000);
   };
 
-  const handleAddGoods = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    try {
-      const qrcode = `BLX-${Date.now()}-${Math.random().toString(36).substr(2, 5).toUpperCase()}`;
-      const newGoods: Goods = {
-        id: `GOOD-${Date.now()}`,
-        uid: `GOOD-${Date.now()}`,
-        itemName: name,
-        category,
-        quantity,
-        unit,
-        status: LogisticStatus.IN_GUDANG,
-        verificationStatus: "APPROVED",
-        warehouseStatus: "Masuk Gudang",
-        currentLocation: "Gudang Logistik",
-        deliveryStatus: "Belum Dikirim",
-        assignedVolunteer: "",
-        warehouseId: user.uid,
-        qrcode,
-        donorName: "Admin/Gudang",
-        donorWallet: user.walletAddress || "",
-        transactionHash: "",
-        network: "Solana Devnet",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        verifiedAt: new Date().toISOString(),
-        verifiedBy: user.displayName || "Admin",
-        source: "Input Manual Gudang"
-      };
-      
-      const savedLogistics = localStorage.getItem("logistics");
-      const currentLogistics = savedLogistics ? JSON.parse(savedLogistics) : [];
-      const updatedLogistics = [newGoods, ...currentLogistics];
-      localStorage.setItem("logistics", JSON.stringify(updatedLogistics));
-      setGoods(updatedLogistics);
 
-      setName('');
-      setShowAddForm(false);
-      setNotification({
-        msg: `Barang "${newGoods.itemName}" berhasil diregistrasi di gudang.`,
-        type: 'success'
-      });
-      setTimeout(() => setNotification(null), 5000);
-    } catch (error: any) {
-      setNotification({
-        msg: `Gagal meregistrasi barang: ${error.message || 'Error tidak diketahui'}`,
-        type: 'error'
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
 
   return (
     <div className="space-y-8">
@@ -236,43 +263,75 @@ export default function WarehouseDashboard({ user, walletConnected, walletNetwor
       </AnimatePresence>
 
       {/* Header Stat Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
         <StatSummaryCard 
           icon={<Package className="text-blue-400" />} 
           label="Total Stok" 
-          value={`${goods.length} Barang`} 
-          subtext="Warehouse Inventory"
+          value={`${totalStok} Barang`} 
+          subtext="Barang terverifikasi"
         />
         <StatSummaryCard 
           icon={<ClipboardList className="text-amber-400" />} 
           label="Stok di Gudang" 
-          value={goods.filter(g => g.status === LogisticStatus.IN_GUDANG).length.toString()} 
-          subtext="Available for Distribution"
+          value={`${stokDiGudang} Barang`} 
+          subtext="Tersedia di gudang"
+        />
+        <StatSummaryCard 
+          icon={<ArrowRight className="text-purple-400" />} 
+          label="Siap Dikirim" 
+          value={`${siapDikirim} Barang`} 
+          subtext="Siap didistribusikan"
         />
         <StatSummaryCard 
           icon={<History className="text-emerald-400" />} 
           label="Sudah Didistribusi" 
-          value={goods.filter(g => g.status !== LogisticStatus.IN_GUDANG).length.toString()} 
-          subtext="Tracked On-chain"
+          value={`${sudahDistribusi} Barang`} 
+          subtext="Telah sampai tujuan"
         />
       </div>
+
+      {/* Admin Purchased Goods Preparation Notice */}
+      {warehouseItems.some(g => g.source === "Pembelian Admin (Dana Bantuan)" && g.status === LogisticStatus.IN_GUDANG) && (
+        <motion.div 
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-4"
+        >
+          <div className="flex items-start gap-4">
+            <div className="p-3 bg-amber-500/20 rounded-xl text-amber-400 shrink-0">
+              <Package className="h-6 w-6 animate-pulse" />
+            </div>
+            <div>
+              <h4 className="font-black text-sm text-amber-400 uppercase tracking-wider flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-amber-500 animate-ping" />
+                Daftar Persiapan Pembelian Admin
+              </h4>
+              <p className="text-xs font-bold text-slate-300 mt-1">
+                Tim Admin baru saja mencatat pembelian logistik menggunakan Dana Bantuan. Segera siapkan barang-barang berikut di gudang untuk disalurkan ke posko tujuan:
+              </p>
+              <div className="flex flex-wrap gap-2 mt-3">
+                {warehouseItems
+                  .filter(g => g.source === "Pembelian Admin (Dana Bantuan)" && g.status === LogisticStatus.IN_GUDANG)
+                  .map(g => (
+                    <span key={g.id} className="text-[10px] font-black bg-[#0f172a] border border-slate-800 text-amber-300 px-3 py-1.5 rounded-lg flex items-center gap-1.5 shadow-md">
+                      <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400" />
+                      📦 {g.itemName} ({g.quantity} {g.unit}) ➔ {g.destination}
+                    </span>
+                  ))
+                }
+              </div>
+            </div>
+          </div>
+        </motion.div>
+      )}
 
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-[#1e293b] p-6 rounded-2xl border border-slate-700/50 shadow-xl gap-4">
         <div className="flex items-center gap-3">
           <Warehouse className="h-6 w-6 text-blue-500" />
           <div>
-            <h2 className="text-xl font-bold">Manajemen Barang & QR Tracking</h2>
-            <p className="text-[10px] uppercase font-bold text-slate-500 tracking-widest mt-1">Gudang: {user.displayName}</p>
+            <h2 className="text-xl font-bold">Inventory Gudang</h2>
+            <p className="text-xs text-slate-400 mt-1">Barang yang telah diverifikasi admin dan siap dikelola gudang</p>
           </div>
-        </div>
-        <div className="flex flex-wrap gap-3 w-full sm:w-auto">
-          <button 
-            onClick={() => setShowAddForm(true)}
-            className="flex-1 sm:flex-none bg-blue-600 text-white px-6 py-3 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-blue-500 transition-all shadow-lg shadow-blue-600/20 cursor-pointer"
-          >
-            <Plus className="h-5 w-5" />
-            Input Barang
-          </button>
         </div>
         <button 
           onClick={() => {
@@ -333,98 +392,7 @@ export default function WarehouseDashboard({ user, walletConnected, walletNetwor
         )}
       </AnimatePresence>
 
-      {/* Add Form Modal */}
-      <AnimatePresence>
-        {showAddForm && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="bg-[#1e293b] w-full max-w-lg rounded-3xl shadow-2xl border border-slate-700 p-8"
-            >
-              <h3 className="text-2xl font-bold mb-6 flex items-center gap-2">
-                <Package className="text-blue-500" />
-                Registrasi Logistik
-              </h3>
-              <form onSubmit={handleAddGoods} className="space-y-6">
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Nama Barang</label>
-                    <input 
-                      required 
-                      value={name} 
-                      onChange={e => setName(e.target.value)}
-                      className="w-full px-4 py-3 bg-[#0f172a] border border-slate-800 rounded-xl text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all"
-                      placeholder="Misal: Beras Super, Tenda Darurat"
-                    />
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Kategori</label>
-                      <select 
-                        value={category} 
-                        onChange={e => setCategory(e.target.value)}
-                        className="w-full px-4 py-3 bg-[#0f172a] border border-slate-800 rounded-xl text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all font-medium appearance-none"
-                      >
-                        <option>Makanan</option>
-                        <option>Pakaian</option>
-                        <option>Kesehatan</option>
-                        <option>Perlengkapan</option>
-                        <option>Lainnya</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Jumlah & Satuan</label>
-                      <div className="flex gap-2">
-                        <input 
-                          type="number" 
-                          min="1" 
-                          value={quantity} 
-                          onChange={e => setQuantity(parseInt(e.target.value))}
-                          className="w-20 px-4 py-3 bg-[#0f172a] border border-slate-800 rounded-xl text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all"
-                        />
-                        <input 
-                          value={unit} 
-                          onChange={e => setUnit(e.target.value)}
-                          className="flex-1 px-4 py-3 bg-[#0f172a] border border-slate-800 rounded-xl text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all font-mono text-xs uppercase"
-                          placeholder="BOX/KG"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </div>
 
-                <div className="p-4 bg-[#0f172a] rounded-2xl border border-dashed border-slate-800 text-center">
-                   <div className="bg-white p-3 inline-block rounded-xl shadow-lg mb-3">
-                     <QrCode className="h-10 w-10 text-slate-900" />
-                   </div>
-                   <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">Digital Identifiers</p>
-                   <p className="text-[9px] text-slate-600 mt-1 italic">Unique UUID will be assigned automatically</p>
-                </div>
-
-                <div className="flex gap-4 pt-4">
-                  <button 
-                    type="button"
-                    onClick={() => setShowAddForm(false)}
-                    className="flex-1 py-4 font-bold text-slate-400 hover:text-white transition-colors cursor-pointer"
-                  >
-                    Batal
-                  </button>
-                  <button 
-                    type="submit"
-                    disabled={loading}
-                    className="flex-1 py-4 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-500 transition-all shadow-lg shadow-blue-600/20 cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2"
-                  >
-                    {loading ? 'Processing...' : 'Simpan & Sync'}
-                    <ArrowRight className="h-4 w-4" />
-                  </button>
-                </div>
-              </form>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
 
       <div className="bg-[#1e293b] rounded-3xl border border-slate-700/50 shadow-xl overflow-hidden">
         <div className="p-6 border-b border-slate-700 flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-800/30">
@@ -450,109 +418,130 @@ export default function WarehouseDashboard({ user, walletConnected, walletNetwor
           <table className="w-full text-left border-collapse">
             <thead>
               <tr className="bg-slate-900/50">
-                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">IDENTIFIER / SOURCE</th>
-                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">BLOCKCHAIN RECEIPT</th>
-                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">NODE STATUS</th>
-                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">ACTIONS</th>
+                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">Identifier / Source</th>
+                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">Nama Barang</th>
+                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">Jumlah & Satuan</th>
+                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">Tujuan Posko</th>
+                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">Blockchain Receipt</th>
+                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">Node Status</th>
+                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800">
-              {filteredGoods.length === 0 ? (
+              {filteredWarehouseItems.length === 0 ? (
                 <tr>
-                  <td colSpan={4} className="px-6 py-16 text-center text-slate-600 italic font-mono text-xs uppercase tracking-widest">
-                    No matching records in warehouse ledger
+                  <td colSpan={7} className="px-6 py-16 text-center">
+                    <div className="flex flex-col items-center justify-center gap-2">
+                      <Package className="h-10 w-10 text-slate-600 animate-bounce" />
+                      <div className="font-bold text-slate-400 text-base">Belum ada barang masuk gudang</div>
+                      <div className="text-xs text-slate-500">Barang akan muncul di sini setelah Admin menyetujui donasi barang dari donatur.</div>
+                    </div>
                   </td>
                 </tr>
-              ) : filteredGoods.map((item) => (
+              ) : filteredWarehouseItems.map((item) => (
                 <motion.tr 
                   layout
                   key={item.id} 
                   className="hover:bg-slate-800/40 transition-colors group"
                 >
+                  {/* Identifier / Source */}
+                  <td className="px-6 py-4">
+                    <div className="font-mono text-xs text-blue-400 select-all">{item.id}</div>
+                    <div className="text-[10px] text-slate-500 uppercase font-bold tracking-wider mt-1">
+                      {item.source || "Donasi Donatur"}
+                    </div>
+                  </td>
+
+                  {/* Nama Barang */}
                   <td className="px-6 py-4">
                     <div className="font-bold text-slate-200">{item.itemName || (item as any).name}</div>
-                    <div className="flex flex-wrap items-center gap-2 mt-1">
-                      <div className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">{item.category} • {item.quantity} {item.unit}</div>
-                      {item.condition && (
-                        <span className="text-[8px] font-bold text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded border border-slate-700 uppercase">
-                          {item.condition}
-                        </span>
-                      )}
-                      {(item.donorName || item.donorId) && (
-                        <span className="text-[8px] font-bold text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded border border-blue-500/20 uppercase tracking-[0.05em]">
-                          Donatur: {item.donorName || 'Anonim'}
-                        </span>
-                      )}
-                    </div>
-                    {item.destination && (
-                      <div className="mt-2 flex items-center gap-1.5 text-[9px] text-slate-500 font-medium italic">
-                        <MapPin className="h-3 w-3 text-red-500/50" />
-                        Tujuan: {item.destination}
-                      </div>
-                    )}
+                    <div className="text-[10px] text-slate-400 mt-1">{item.category}</div>
                   </td>
+
+                  {/* Jumlah & Satuan */}
                   <td className="px-6 py-4">
-                    <div className="flex items-center gap-4">
-                      <div className="p-1.5 bg-white rounded-lg shadow-lg group-hover:scale-105 transition-transform border border-slate-200">
-                        <QRCodeSVG value={item.qrcode} size={32} />
+                    <div className="font-bold text-slate-200">{item.quantity} {item.unit}</div>
+                  </td>
+
+                  {/* Tujuan Posko */}
+                  <td className="px-6 py-4">
+                    <div className="font-medium text-slate-300 italic flex items-center gap-1.5">
+                      <MapPin className="h-3 w-3 text-red-500/50" />
+                      {item.destination || "Posko Utama"}
+                    </div>
+                  </td>
+
+                  {/* Blockchain Receipt */}
+                  <td className="px-6 py-4">
+                    <div className="flex items-center gap-3">
+                      <div className="p-1.5 bg-white rounded-lg shadow-lg group-hover:scale-105 transition-transform border border-slate-200 shrink-0">
+                        <QRCodeSVG value={item.qrcode} size={28} />
                       </div>
-                      <div className="flex flex-col gap-1">
-                        <code className="text-[10px] font-mono bg-[#0f172a] px-2 py-1 rounded border border-slate-800 text-blue-400">
+                      <div className="flex flex-col gap-1 min-w-0">
+                        <code className="text-[9px] font-mono bg-[#0f172a] px-1.5 py-0.5 rounded border border-slate-800 text-blue-400 truncate max-w-[124px]">
                           {item.qrcode}
                         </code>
-                        {(item.transactionHash || (item as any).lastTxHash) ? (
-                          <div className="flex flex-col gap-2">
-                            <div className="flex items-center gap-1 text-[9px] text-emerald-500 font-bold uppercase tracking-widest animate-pulse">
-                              <History className="h-3 w-3" /> ON-CHAIN PERSISTENCE
-                            </div>
-                            <a 
-                              href={getExplorerUrl(item.transactionHash || (item as any).lastTxHash, (item.network || (item as any).lastTxNetwork || BlockchainNetwork.SOLANA) as BlockchainNetwork)}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-[9px] font-mono text-blue-500 hover:text-blue-400 truncate max-w-[150px]"
-                            >
-                              {item.transactionHash || (item as any).lastTxHash}
-                            </a>
+                        {item.transactionHash ? (
+                          <div className="flex flex-col gap-0.5">
+                            <div className="text-[8px] text-emerald-500 font-bold uppercase tracking-widest">ON-CHAIN</div>
+                            <code className="text-[9px] font-mono text-slate-500 truncate max-w-[120px]">
+                              {item.transactionHash}
+                            </code>
                           </div>
                         ) : (
-                          <div className="flex items-center gap-1 text-[9px] text-slate-600 font-bold uppercase tracking-widest">
-                            DATABASE ONLY
-                          </div>
+                          <div className="text-[9px] text-slate-600 font-bold uppercase tracking-widest">DATABASE ONLY</div>
                         )}
                       </div>
                     </div>
                   </td>
+
+                  {/* Node Status */}
                   <td className="px-6 py-4">
-                     <div className="flex items-center gap-3">
-                        <span className={cn(
-                          "h-2 w-2 rounded-full",
-                          (item.transactionHash || (item as any).lastTxHash) ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" : "bg-slate-700"
-                        )} />
-                        <StatusBadge status={item.status} />
-                     </div>
-                     <div className="text-[9px] text-slate-600 mt-2 font-mono uppercase">
-                        Sync: {item.updatedAt ? format(new Date(item.updatedAt), 'HH:mm:ss') : 'N/A'}
-                     </div>
+                    <div className="flex items-center gap-3">
+                      <span className={cn(
+                        "h-2 w-2 rounded-full",
+                        item.transactionHash ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" : "bg-slate-700"
+                      )} />
+                      <StatusBadge status={item.status} />
+                    </div>
+                    <div className="text-[9px] text-slate-600 mt-2 font-mono uppercase">
+                      Sync: {item.updatedAt ? format(new Date(item.updatedAt), 'HH:mm:ss') : 'N/A'}
+                    </div>
                   </td>
+
+                  {/* Actions */}
                   <td className="px-6 py-4">
-                    {item.status === LogisticStatus.IN_GUDANG && (
-                       <button 
-                         onClick={() => prepareShipment(item.id)}
-                         className="px-4 py-2 bg-blue-600/20 text-blue-400 border border-blue-500/30 rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-blue-600 hover:text-white transition-all flex items-center gap-2 group"
-                       >
-                         Siapkan Pengiriman
-                         <ArrowUpRight className="h-3 w-3 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
-                       </button>
-                    )}
-                    {item.status === LogisticStatus.READY_FOR_PICKUP && (
-                        <span className="text-[9px] font-bold text-slate-500 italic">Menunggu Relawan...</span>
-                    )}
-                    {item.status === LogisticStatus.PICKED_UP && (
-                        <span className="text-[9px] font-bold text-amber-500 italic">Dalam Pengiriman</span>
-                    )}
-                    {item.status === LogisticStatus.DELIVERED && (
-                        <span className="text-[9px] font-bold text-emerald-500 italic">Selesai Disalurkan</span>
-                    )}
+                    <div className="flex flex-col gap-2">
+                      {item.status === LogisticStatus.IN_GUDANG && (
+                         <button 
+                           onClick={() => prepareShipment(item.id)}
+                           className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white border border-blue-500/30 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-1 group w-max shadow-md shadow-blue-600/10 cursor-pointer"
+                         >
+                           Siapkan Pengiriman
+                           <ArrowUpRight className="h-3.5 w-3.5 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
+                         </button>
+                      )}
+                      {(item.status === LogisticStatus.READY_FOR_PICKUP || item.status === "Siap Dikirim") && (
+                          <span className="text-[9px] font-bold text-slate-500 italic block">Menunggu Relawan...</span>
+                      )}
+                      {(item.status === LogisticStatus.PICKED_UP || item.status === "Dalam Pengiriman") && (
+                          <span className="text-[9px] font-bold text-amber-500 italic block">Dalam Pengiriman</span>
+                      )}
+                      {(item.status === LogisticStatus.DELIVERED || item.status === "Selesai Disalurkan") && (
+                          <span className="text-[9px] font-bold text-emerald-500 italic block">Selesai Disalurkan</span>
+                      )}
+                      {item.transactionHash ? (
+                        <a 
+                          href={`https://explorer.solana.com/tx/${item.transactionHash}?cluster=devnet`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="px-3 py-1.5 bg-slate-800 text-slate-300 border border-slate-700 hover:border-slate-500 rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-slate-700 hover:text-white transition-all flex items-center justify-center gap-1 w-max active:scale-95"
+                        >
+                          Lihat Explorer
+                          <ArrowUpRight className="h-3 w-3" />
+                        </a>
+                      ) : null}
+                    </div>
                   </td>
                 </motion.tr>
               ))}
@@ -581,10 +570,9 @@ function StatSummaryCard({ icon, label, value, subtext }: { icon: React.ReactNod
 
 function StatusBadge({ status }: { status: LogisticStatus | string }) {
   const styles: Record<string, string> = {
-    [LogisticStatus.IN_GUDANG]: "bg-blue-500/10 text-blue-400 border-blue-500/20",
-    [LogisticStatus.PICKED_UP]: "bg-purple-500/10 text-purple-400 border-purple-500/20",
-    [LogisticStatus.IN_TRANSIT]: "bg-amber-500/10 text-amber-400 border-amber-500/20",
-    [LogisticStatus.DELIVERED]: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
+    'Di Gudang': "bg-blue-500/10 text-blue-400 border-blue-500/20",
+    'Dalam Pengiriman': "bg-purple-500/10 text-purple-400 border-purple-500/20",
+    'Selesai Disalurkan': "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
   };
 
   return (

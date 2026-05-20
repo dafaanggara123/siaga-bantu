@@ -25,6 +25,7 @@ export enum LogisticStatus {
   IN_GUDANG = 'Di Gudang',
   READY_FOR_PICKUP = 'Siap Dijemput',
   PICKED_UP = 'Dalam Pengiriman',
+  IN_TRANSIT = 'Dalam Pengiriman',
   DELIVERED = 'Selesai Disalurkan',
   REJECTED = 'Ditolak',
 }

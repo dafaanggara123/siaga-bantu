@@ -18,12 +18,22 @@ interface LoginProps {
 
 export default function Login({ onPublicTracking }: LoginProps) {
   const [isRegistering, setIsRegistering] = useState(false);
-  const [email, setEmail] = useState('');
+  const [emailPrefix, setEmailPrefix] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [role, setRole] = useState<UserRole>(UserRole.DONOR);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+
+  const handleEmailPrefixChange = (value: string) => {
+    if (value.includes('@')) {
+      setError("Tidak perlu menulis @gmail.com.");
+    } else {
+      setError((prev) => prev === "Tidak perlu menulis @gmail.com." ? "" : prev);
+    }
+    const cleaned = value.replace(/@.*/, "").trim();
+    setEmailPrefix(cleaned);
+  };
 
   const handleGoogleSignIn = async () => {
     setError('');
@@ -55,18 +65,27 @@ export default function Login({ onPublicTracking }: LoginProps) {
     setError('');
     setLoading(true);
 
+    const username = emailPrefix.trim();
+    if (!username) {
+      setError("Nama email wajib diisi.");
+      setLoading(false);
+      return;
+    }
+
+    const finalEmail = `${username}@gmail.com`;
+
     try {
       if (isRegistering) {
-        const { user: firebaseUser } = await createUserWithEmailAndPassword(auth, email, password);
+        const { user: firebaseUser } = await createUserWithEmailAndPassword(auth, finalEmail, password);
         const userProfile: UserProfile = {
           uid: firebaseUser.uid,
-          email,
+          email: finalEmail,
           displayName: name || firebaseUser.email?.split('@')[0] || 'User',
           role: role || UserRole.DONOR,
         };
         await setDoc(doc(db, 'users', firebaseUser.uid), userProfile);
       } else {
-        await signInWithEmailAndPassword(auth, email, password);
+        await signInWithEmailAndPassword(auth, finalEmail, password);
       }
     } catch (err: any) {
       if (err.code === 'auth/operation-not-allowed') {
@@ -190,14 +209,20 @@ export default function Login({ onPublicTracking }: LoginProps) {
                 <div className="relative">
                   <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-slate-500" />
                   <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    className="w-full pl-10 pr-4 py-3 bg-[#0f172a] border border-slate-700 rounded-xl text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none"
-                    placeholder="name@company.com"
+                    type="text"
+                    value={emailPrefix}
+                    onChange={(e) => handleEmailPrefixChange(e.target.value)}
+                    className="w-full pl-10 pr-28 py-3 bg-[#0f172a] border border-slate-700 rounded-xl text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none"
+                    placeholder="namaakun"
                     required
                   />
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 font-medium select-none text-sm pointer-events-none">
+                    @gmail.com
+                  </span>
                 </div>
+                <p className="mt-1.5 text-[10px] text-slate-500 font-semibold select-none">
+                  Cukup masukkan nama akun Gmail, tanpa @gmail.com
+                </p>
               </div>
 
               <div>

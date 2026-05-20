@@ -110,7 +110,62 @@ export default function AdminDashboard({ user, walletNetwork, onConnect }: Admin
     const unsubscribeUsage = onSnapshot(collection(db, 'fundUsage'), (snapshot) => {
       const items: FundUsage[] = [];
       snapshot.forEach((doc) => items.push({ id: doc.id, ...doc.data() } as FundUsage));
-      setFundUsage(items.sort((a, b) => b.createdAt - a.createdAt));
+      const sortedUsage = items.sort((a, b) => b.createdAt - a.createdAt);
+      setFundUsage(sortedUsage);
+
+      const purchaseItems = items.filter(f => f.usageType === 'Pembelian Logistik');
+      if (purchaseItems.length > 0) {
+        const savedLogistics = localStorage.getItem("logistics");
+        const currentLogistics: Goods[] = savedLogistics ? JSON.parse(savedLogistics) : [];
+        let hasChanges = false;
+
+        purchaseItems.forEach(fund => {
+          const isAlreadyRegistered = currentLogistics.some(item => 
+            (item.id === `GOOD-PURCHASE-${fund.id}`) ||
+            (fund.transactionHash && item.transactionHash === fund.transactionHash) ||
+            (item.itemName === (fund.purpose || `Pembelian Logistik: ${fund.category}`) && item.donorWallet === fund.adminWallet)
+          );
+
+          if (!isAlreadyRegistered) {
+            const itemQrcode = `SB-PUR-${Math.floor(Math.random() * 900000 + 100000)}`;
+            const purchasedGoods: Goods = {
+              id: `GOOD-PURCHASE-${fund.id}`,
+              uid: `GOOD-PURCHASE-${fund.id}`,
+              itemName: fund.purpose || `Pembelian Logistik: ${fund.category}`,
+              category: fund.category,
+              quantity: 1,
+              unit: "Paket",
+              condition: "Baru",
+              destination: fund.recipient || "Posko Utama",
+              source: "Pembelian Admin (Dana Bantuan)",
+              status: LogisticStatus.IN_GUDANG,
+              warehouseId: "", 
+              note: fund.note || `Dibeli oleh Admin menggunakan Dana Bantuan. Harap petugas gudang segera menyiapkan paket logistik ini untuk tujuan: ${fund.recipient}.`,
+              qrcode: itemQrcode,
+              donorWallet: fund.adminWallet || "",
+              donorName: `Admin`,
+              transactionHash: fund.transactionHash,
+              network: fund.network || "Solana Devnet",
+              verificationStatus: "APPROVED",
+              currentLocation: "Gudang Logistik",
+              warehouseStatus: "Menunggu Persiapan Gudang",
+              deliveryStatus: "Belum Dikirim",
+              assignedVolunteer: "",
+              createdAt: new Date(fund.createdAt || Date.now()).toISOString(),
+              updatedAt: new Date(fund.createdAt || Date.now()).toISOString(),
+              verifiedAt: new Date(fund.createdAt || Date.now()).toISOString(),
+              verifiedBy: "Admin",
+            };
+            currentLogistics.unshift(purchasedGoods);
+            hasChanges = true;
+          }
+        });
+
+        if (hasChanges) {
+          localStorage.setItem("logistics", JSON.stringify(currentLogistics));
+          setLogistics(currentLogistics);
+        }
+      }
     }, (error) => handleFirestoreError(error, OperationType.LIST, 'fundUsage'));
 
     return () => {
@@ -133,8 +188,8 @@ export default function AdminDashboard({ user, walletNetwork, onConnect }: Admin
   );
 
   const filteredLogistics = approvedLogistics.filter(g => 
-    (g.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-    g.qrcode.toLowerCase().includes(searchTerm.toLowerCase()))
+    ((g.itemName || g.name || "").toLowerCase().includes((searchTerm || "").toLowerCase()) || 
+    (g.qrcode || "").toLowerCase().includes((searchTerm || "").toLowerCase()))
   );
 
   const approveGoodsDonation = (donationId: string) => {
@@ -212,25 +267,54 @@ export default function AdminDashboard({ user, walletNetwork, onConnect }: Admin
       return;
     }
 
-    const updatedGoodsDonations = goodsDonations.map(item =>
-      String(item.id) === String(donationId)
-        ? {
-            ...item,
-            status: "Ditolak",
-            verificationStatus: "REJECTED",
-            rejectedAt: new Date().toISOString(),
-            rejectedBy: user.displayName || "Admin",
-            rejectionReason: reason
-          }
-        : item
+    const selectedDonation = goodsDonations.find(
+      item => String(item.id) === String(donationId)
+    );
+
+    if (!selectedDonation) {
+      setNotification({ msg: "Data donasi barang tidak ditemukan.", type: 'error' });
+      return;
+    }
+
+    // Send notification to donor by writing to donorNotifications in localStorage
+    const donorId = selectedDonation.donorId || selectedDonation.uid;
+    const newNotification = {
+      id: `NOTIF-${Date.now()}`,
+      donorId: donorId,
+      itemName: selectedDonation.itemName || (selectedDonation as any).name || "Barang",
+      reason: reason,
+      message: `Donasi barang "${selectedDonation.itemName || (selectedDonation as any).name}" ditolak oleh Admin. Alasan: ${reason}`,
+      createdAt: new Date().toISOString(),
+      read: false
+    };
+
+    try {
+      const savedNotifs = localStorage.getItem("donorNotifications");
+      const currentNotifs = savedNotifs ? JSON.parse(savedNotifs) : [];
+      const updatedNotifs = [newNotification, ...currentNotifs];
+      localStorage.setItem("donorNotifications", JSON.stringify(updatedNotifs));
+    } catch (e) {
+      console.error("Gagal mengirim notifikasi ke donatur:", e);
+    }
+
+    // Delete item completely from goodsDonations and logistics to make sure it doesn't appear anywhere
+    const updatedGoodsDonations = goodsDonations.filter(
+      item => String(item.id) !== String(donationId)
+    );
+
+    const updatedLogistics = logistics.filter(
+      item => String(item.uid) !== String(selectedDonation.uid) && String(item.id) !== String(donationId)
     );
 
     setGoodsDonations(updatedGoodsDonations);
+    setLogistics(updatedLogistics);
+
     localStorage.setItem("goodsDonations", JSON.stringify(updatedGoodsDonations));
+    localStorage.setItem("logistics", JSON.stringify(updatedLogistics));
 
     setShowRejectModal(null);
     setRejectionReason('');
-    setNotification({ msg: "Donasi barang berhasil ditolak.", type: 'success' });
+    setNotification({ msg: "Donasi barang berhasil ditolak & dihapus seketika. Notifikasi penolakan telah dikirim ke donatur.", type: 'success' });
     setTimeout(() => setNotification(null), 5000);
   };
 
@@ -409,6 +493,53 @@ export default function AdminDashboard({ user, walletNetwork, onConnect }: Admin
         createdAt: Date.now()
       };
 
+      // Automatically register a logistics item for the warehouse when purchasing logistics
+      if (usageType === 'Pembelian Logistik') {
+        const itemQrcode = `SB-PUR-${Math.floor(Math.random() * 900000 + 100000)}`;
+        const purchasedGoods: Goods = {
+          id: `GOOD-PURCHASE-${Date.now()}`,
+          uid: `GOOD-PURCHASE-${Date.now()}`,
+          itemName: purpose || `Pembelian Logistik: ${fundCategory}`,
+          category: fundCategory,
+          quantity: 1, // 1 package
+          unit: "Paket",
+          condition: "Baru",
+          destination: recipient || "Posko Utama",
+          source: "Pembelian Admin (Dana Bantuan)",
+          status: LogisticStatus.IN_GUDANG,
+          warehouseId: "", 
+          note: `Dibeli oleh Admin menggunakan Dana Bantuan. Harap petugas gudang segera menyiapkan paket logistik ini untuk tujuan: ${recipient}. Catatan Admin: ${fundNote || 'Tidak ada'}`,
+          qrcode: itemQrcode,
+          donorWallet: user.walletAddress || "",
+          donorName: `Admin (${user.displayName || 'Bencana Panel'})`,
+          transactionHash: signature,
+          network: "Solana Devnet",
+          verificationStatus: "APPROVED",
+          currentLocation: "Gudang Logistik",
+          warehouseStatus: "Menunggu Persiapan Gudang",
+          deliveryStatus: "Belum Dikirim",
+          assignedVolunteer: "",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          verifiedAt: new Date().toISOString(),
+          verifiedBy: user.displayName || "Admin",
+        };
+
+        // Write to Firestore 'goods' collection to sync
+        try {
+          await addDoc(collection(db, 'goods'), purchasedGoods);
+        } catch (fe) {
+          console.warn("Firestore save failed for purchased goods, using local storage update.");
+        }
+
+        // Add to logistics local list so it triggers immediately
+        const savedLogistics = localStorage.getItem("logistics");
+        const currentLogistics: Goods[] = savedLogistics ? JSON.parse(savedLogistics) : [];
+        const updatedLogistics = [purchasedGoods, ...currentLogistics];
+        localStorage.setItem("logistics", JSON.stringify(updatedLogistics));
+        setLogistics(updatedLogistics);
+      }
+
       try {
         await addDoc(collection(db, 'fundUsage'), newUsageData);
       } catch (dbError: any) {
@@ -513,12 +644,6 @@ export default function AdminDashboard({ user, walletNetwork, onConnect }: Admin
         </div>
         <div className="flex gap-3">
           <button 
-            onClick={() => setShowResetModal(true)}
-            className="bg-red-600/20 text-red-500 px-6 py-3 rounded-xl font-bold border border-red-500/30 hover:bg-red-600/30 transition-all cursor-pointer text-xs"
-          >
-            Reset Database Barang
-          </button>
-          <button 
             onClick={() => setShowFundForm(true)}
             className="bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 hover:bg-emerald-500 transition-all shadow-lg shadow-emerald-600/20 cursor-pointer"
           >
@@ -535,9 +660,38 @@ export default function AdminDashboard({ user, walletNetwork, onConnect }: Admin
         </div>
       </div>
 
+      {/* Admin Notification Banner for Pending Donations */}
+      {pendingGoodsDonations.length > 0 && (
+        <motion.div 
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-amber-500/10 border border-amber-500/30 p-6 rounded-3xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-xl"
+        >
+          <div className="flex items-center gap-4">
+            <div className="p-3 bg-amber-500/20 text-amber-400 rounded-2xl animate-pulse">
+              <Package className="h-6 w-6" />
+            </div>
+            <div>
+              <p className="text-sm font-black text-amber-400 uppercase tracking-wider mb-0.5">🔔 Persetujuan Donasi Baru</p>
+              <p className="text-xs text-slate-300 font-medium">Ada <span className="text-amber-400 font-extrabold">{pendingGoodsDonations.length} donasi barang baru</span> dari donor yang memerlukan tinjauan, persetujuan, atau penolakan Anda.</p>
+            </div>
+          </div>
+          <button 
+            type="button"
+            onClick={() => {
+              const el = document.getElementById("verifikasi-donasi-barang-sec");
+              if (el) el.scrollIntoView({ behavior: 'smooth' });
+            }}
+            className="px-5 py-2.5 bg-amber-500 text-slate-950 font-black uppercase tracking-widest text-[10px] rounded-xl hover:bg-amber-400 transition-colors shadow-lg cursor-pointer self-start sm:self-auto"
+          >
+            Tinjau Antrean
+          </button>
+        </motion.div>
+      )}
+
       {/* Verification Section */}
       {pendingGoodsDonations.length > 0 && (
-        <div className="space-y-6">
+        <div id="verifikasi-donasi-barang-sec" className="space-y-6 scroll-mt-6">
           <div className="flex items-center gap-3">
              <div className="p-2 bg-amber-500/20 rounded-lg">
                 <Package className="h-5 w-5 text-amber-500" />
@@ -1335,13 +1489,12 @@ function StatCard({ icon, label, value, subtext, trend, fullValue }: { icon: Rea
 
 function StatusBadge({ status }: { status: LogisticStatus | string }) {
   const styles: Record<string, string> = {
-    [LogisticStatus.PENDING_ADMIN]: "bg-amber-500/10 text-amber-500 border-amber-500/20",
-    [LogisticStatus.IN_GUDANG]: "bg-blue-500/10 text-blue-400 border-blue-500/20",
-    [LogisticStatus.PICKED_UP]: "bg-purple-500/10 text-purple-400 border-purple-500/20",
-    [LogisticStatus.IN_TRANSIT]: "bg-amber-500/10 text-amber-400 border-amber-500/20",
-    [LogisticStatus.DELIVERED]: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
-    [LogisticStatus.REJECTED]: "bg-red-500/10 text-red-500 border-red-500/20",
-    "Ditolak": "bg-red-500/10 text-red-500 border-red-500/20",
+    'Menunggu Verifikasi': "bg-amber-500/10 text-amber-500 border-amber-500/20",
+    'Di Gudang': "bg-blue-500/10 text-blue-400 border-blue-500/20",
+    'Siap Dijemput': "bg-amber-500/10 text-amber-500 border-amber-500/20",
+    'Dalam Pengiriman': "bg-purple-500/10 text-purple-400 border-purple-500/20",
+    'Selesai Disalurkan': "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
+    'Ditolak': "bg-red-500/10 text-red-500 border-red-500/20",
   };
 
   return (

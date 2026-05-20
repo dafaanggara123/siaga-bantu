@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { collection, query, where, onSnapshot, addDoc } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../../firebase';
 import { UserProfile, Donation, LogisticStatus, Goods, BlockchainNetwork } from '../../types';
-import { Heart, Wallet, History, ExternalLink, ArrowRight, ShieldCheck, CheckCircle, Package, Plus, ClipboardList } from 'lucide-react';
+import { Heart, Wallet, History, ExternalLink, ArrowRight, ShieldCheck, CheckCircle, Package, Plus, ClipboardList, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format } from 'date-fns';
 import { generateTxHash, getExplorerUrl, getCurrencySymbol, cn } from '../../lib/utils';
@@ -36,6 +36,25 @@ export default function DonorDashboard({ user, walletConnected, walletNetwork, o
   const [showGoodsForm, setShowGoodsForm] = useState(false);
   const [successGoods, setSuccessGoods] = useState<Goods | null>(null);
   const [notification, setNotification] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
+  const [donorNotifications, setDonorNotifications] = useState<any[]>([]);
+
+  const dismissNotification = (notifId: string) => {
+    try {
+      const savedNotifications = localStorage.getItem("donorNotifications");
+      if (savedNotifications) {
+        const allNotifs = JSON.parse(savedNotifications) as any[];
+        const updatedNotifs = allNotifs.filter(n => String(n.id) !== String(notifId));
+        localStorage.setItem("donorNotifications", JSON.stringify(updatedNotifs));
+        setDonorNotifications(
+          updatedNotifs.filter(n => n.donorId === user.uid).sort((a, b) => 
+            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+          )
+        );
+      }
+    } catch (e) {
+      console.error("Gagal menghapus notifikasi:", e);
+    }
+  };
 
   const refreshSolBalance = async () => {
     try {
@@ -61,6 +80,17 @@ export default function DonorDashboard({ user, walletConnected, walletNetwork, o
         (typeof b.createdAt === 'number' ? b.createdAt : new Date(b.createdAt).getTime()) - 
         (typeof a.createdAt === 'number' ? a.createdAt : new Date(a.createdAt).getTime())
       ));
+    }
+
+    // Load donor notifications from localStorage
+    const savedNotifications = localStorage.getItem("donorNotifications");
+    if (savedNotifications) {
+      const allNotifs = JSON.parse(savedNotifications) as any[];
+      setDonorNotifications(
+        allNotifs.filter(n => n.donorId === user.uid).sort((a, b) => 
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+        )
+      );
     }
 
     const q = query(collection(db, 'donations'), where('donorId', '==', user.uid));
@@ -282,79 +312,141 @@ export default function DonorDashboard({ user, walletConnected, walletNetwork, o
       {/* Goods Donation Success Modal */}
       <AnimatePresence>
         {successGoods && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[400] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md"
-          >
+          <div className="fixed inset-0 z-[500] flex items-center justify-center">
+            {/* Full screen backdrop with blur overlay */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setSuccessGoods(null)}
+              className="fixed inset-0 bg-black/70 backdrop-blur-md cursor-pointer"
+            />
+            
+            {/* Modal Container */}
             <motion.div
               initial={{ scale: 0.9, opacity: 0, y: 20 }}
               animate={{ scale: 1, opacity: 1, y: 0 }}
               exit={{ scale: 0.9, opacity: 0, y: 20 }}
-              className="bg-[#1e293b] border border-slate-700 rounded-[3rem] w-full max-w-lg p-10 relative overflow-hidden shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+              className="relative z-10 w-full max-w-xl rounded-3xl bg-[#0f172a] border border-slate-800 shadow-2xl max-h-[85vh] flex flex-col overflow-hidden m-4"
             >
-              <div className="absolute top-0 right-0 -mr-20 -mt-20 w-80 h-80 bg-emerald-500/10 rounded-full blur-3xl" />
+              {/* Background Glow */}
+              <div className="absolute top-0 right-0 -mr-20 -mt-20 w-64 h-64 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none" />
               
-              <div className="relative text-center">
-                <div className="mx-auto w-24 h-24 bg-emerald-500 rounded-[2rem] flex items-center justify-center mb-8 shadow-2xl shadow-emerald-900/40 rotate-12">
-                  <CheckCircle className="h-12 w-12 text-white -rotate-12" />
+              {/* Sticky Top Header with Absolute Close Button (X) */}
+              <div className="flex items-center justify-between p-5 border-b border-white/5 bg-slate-900/50 sticky top-0 z-20">
+                <div className="flex items-center gap-2 text-emerald-400">
+                  <CheckCircle className="h-5 w-5" />
+                  <span className="text-[10px] font-black uppercase tracking-[0.2em]">Donasi Terverifikasi</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSuccessGoods(null)}
+                  className="p-1.5 rounded-lg bg-slate-800/80 text-slate-400 hover:text-white hover:bg-slate-700 transition-colors cursor-pointer"
+                  title="Tutup"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {/* Scrollable Content Body */}
+              <div className="overflow-y-auto p-6 space-y-6 flex-1 scrollbar-none">
+                <div className="text-center">
+                  <div className="mx-auto w-14 h-14 bg-emerald-500/15 rounded-2xl flex items-center justify-center mb-4 shadow-xl shadow-emerald-950/20 rotate-12">
+                    <CheckCircle className="h-7 w-7 text-emerald-400 -rotate-12" />
+                  </div>
+                  
+                  <h3 className="text-xl font-black text-white leading-tight">Donasi Barang Berhasil Dicatat</h3>
+                  <p className="text-emerald-500/80 font-bold uppercase tracking-widest text-[9px] mt-1">Anchored On Solana Developer Network</p>
                 </div>
                 
-                <h3 className="text-3xl font-black text-white mb-2 leading-tight">Donasi Barang Berhasil Dicatat</h3>
-                <p className="text-emerald-400 font-bold uppercase tracking-widest text-[10px] mb-8">Permanently Anchored on Solana Devnet</p>
-                
-                <div className="bg-[#0f172a]/80 border border-slate-800 rounded-3xl p-6 text-left space-y-4 mb-8">
-                  <div className="flex justify-between items-center pb-3 border-b border-white/5">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Detail Barang</span>
-                    <span className="text-sm font-bold text-white">{successGoods.itemName}</span>
+                {/* Details list card */}
+                <div className="bg-[#1e293b]/50 border border-slate-800/80 rounded-2xl p-5 space-y-4">
+                  <div className="flex justify-between items-center pb-2.5 border-b border-white/5">
+                    <span className="text-[9px] font-extrabold text-slate-500 uppercase tracking-wider">Detail Barang</span>
+                    <span className="text-xs font-black text-slate-200">{successGoods.itemName}</span>
                   </div>
-                  <div className="flex justify-between items-center pb-3 border-b border-white/5">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Jumlah & Satuan</span>
-                    <span className="text-sm font-bold text-white">{successGoods.quantity} {successGoods.unit}</span>
+                  <div className="flex justify-between items-center pb-2.5 border-b border-white/5">
+                    <span className="text-[9px] font-extrabold text-slate-500 uppercase tracking-wider">Jumlah & Satuan</span>
+                    <span className="text-xs font-black text-slate-200">{successGoods.quantity} {successGoods.unit}</span>
                   </div>
-                  <div className="flex justify-between items-center pb-3 border-b border-white/5">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Tujuan Bantuan</span>
-                    <span className="text-sm font-bold text-white">{successGoods.destination}</span>
+                  <div className="flex justify-between items-center pb-2.5 border-b border-white/5">
+                    <span className="text-[9px] font-extrabold text-slate-500 uppercase tracking-wider">Tujuan Bantuan</span>
+                    <span className="text-xs font-black text-slate-200">{successGoods.destination}</span>
                   </div>
-                  <div className="flex justify-between items-center pb-3 border-b border-white/5">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Status</span>
-                    <span className="px-3 py-1 bg-amber-500/10 text-amber-400 rounded-full text-[10px] font-black uppercase tracking-tighter border border-amber-500/20">{successGoods.status}</span>
+                  <div className="flex justify-between items-center pb-2.5 border-b border-white/5">
+                    <span className="text-[9px] font-extrabold text-slate-500 uppercase tracking-wider">Status</span>
+                    <span className="px-2.5 py-0.5 bg-amber-500/10 text-amber-400 rounded-lg text-[9px] font-black uppercase tracking-wide border border-amber-500/20">{successGoods.status}</span>
                   </div>
-                  <div className="flex justify-between items-center pb-3 border-b border-white/5">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Network</span>
-                    <span className="text-sm font-bold text-blue-400">Solana Devnet</span>
+                  <div className="flex justify-between items-center pb-2.5 border-b border-white/5">
+                    <span className="text-[9px] font-extrabold text-slate-500 uppercase tracking-wider">Network</span>
+                    <span className="text-xs font-black text-blue-400 font-mono">SOLANA DEVNET</span>
                   </div>
-                  <div className="space-y-1">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Transaction Hash</span>
-                    <code className="block p-3 bg-black/40 rounded-xl text-[10px] font-mono text-blue-400 overflow-hidden text-ellipsis whitespace-nowrap">
+                  <div className="space-y-1.5 pt-1">
+                    <span className="text-[9px] font-extrabold text-slate-500 uppercase tracking-wider block">Transaction Hash</span>
+                    <code className="block p-3 bg-black/40 rounded-xl text-[9px] font-mono text-blue-400 break-all select-all leading-normal">
                       {successGoods.transactionHash}
                     </code>
                   </div>
                 </div>
+              </div>
 
-                <div className="flex flex-col gap-3">
-                  <a 
-                    href={getExplorerUrl(successGoods.transactionHash || '', (successGoods.network as BlockchainNetwork) || BlockchainNetwork.SOLANA)}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="w-full py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-blue-900/20"
-                  >
-                    Lihat di Solana Explorer
-                    <ExternalLink className="h-4 w-4" />
-                  </a>
-                  <button 
-                    onClick={() => setSuccessGoods(null)}
-                    className="w-full py-4 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-2xl font-bold transition-all"
-                  >
-                    Tutup
-                  </button>
-                </div>
+              {/* Bottom Sticky Action Buttons */}
+              <div className="p-5 border-t border-white/5 bg-slate-900/50 flex flex-col sm:flex-row gap-3 z-20">
+                <a 
+                  href={getExplorerUrl(successGoods.transactionHash || '', (successGoods.network as BlockchainNetwork) || BlockchainNetwork.SOLANA)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex-1 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-blue-900/10 text-xs uppercase tracking-wider"
+                >
+                  Lihat di Solana Explorer
+                  <ExternalLink className="h-4 w-4" />
+                </a>
+                <button 
+                  onClick={() => setSuccessGoods(null)}
+                  className="sm:w-32 py-3 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl font-bold transition-all text-xs uppercase tracking-wider cursor-pointer"
+                >
+                  Tutup
+                </button>
               </div>
             </motion.div>
-          </motion.div>
+          </div>
         )}
       </AnimatePresence>
+
+      {/* Donor Rejection Feed Notifications */}
+      {donorNotifications.length > 0 && (
+        <div className="space-y-4">
+          {donorNotifications.map((notif) => (
+            <motion.div
+              layout
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-red-500/10 border border-red-500/30 p-6 rounded-[2rem] flex items-center justify-between gap-4 shadow-xl"
+              key={notif.id}
+            >
+              <div className="flex items-start gap-4">
+                <div className="p-3 bg-red-500/20 text-red-400 rounded-2xl flex-shrink-0 animate-pulse">
+                  <Plus className="h-6 w-6 rotate-45 text-red-400" />
+                </div>
+                <div className="space-y-1">
+                  <p className="text-sm font-black text-red-400 uppercase tracking-widest leading-none mb-1">⚠️ Donasi Barang Ditolak</p>
+                  <p className="text-xs font-bold text-white leading-snug">Donasi fisik Anda dengan nama barang <span className="text-red-400 font-extrabold">"{notif.itemName}"</span> ditolak oleh pihak Admin.</p>
+                  <p className="text-xs text-slate-400 font-medium">Alasan Penolakan: <span className="text-red-300 font-bold italic">"{notif.reason}"</span></p>
+                  <p className="text-[10px] font-mono text-slate-600 mt-1">{format(new Date(notif.createdAt), 'dd MMM yyyy, HH:mm')}</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => dismissNotification(notif.id)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-xl font-bold text-[10px] uppercase tracking-wider transition-colors cursor-pointer flex-shrink-0"
+              >
+                Hapus Notif
+              </button>
+            </motion.div>
+          ))}
+        </div>
+      )}
 
       <div className="grid lg:grid-cols-2 gap-8">
         {/* Left: Donation Form */}

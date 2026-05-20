@@ -50,17 +50,24 @@ export default function PublicTracking() {
       const savedLogistics = localStorage.getItem("logistics");
       const localLogistics: Goods[] = savedLogistics ? JSON.parse(savedLogistics) : [];
 
-      // Combine with local logistics for total view in this browser. Prioritize local if IDs match
+      // Combine with local logistics for total view in this browser. Prioritize local if IDs match, and drop any old seed entries
       const combined = [...localLogistics];
+      
+      // Cutoff date of May 20, 2026 to discard all old historical seed data
+      const cutoffTime = new Date('2026-05-20T00:00:00Z').getTime();
+
       items.forEach(item => {
-        if (!combined.find(l => l.id === item.id)) {
+        const itemTime = item.createdAt ? new Date(item.createdAt).getTime() : 0;
+        const isNewItem = itemTime >= cutoffTime || String(item.id).startsWith('GOOD-PURCHASE');
+        
+        if (isNewItem && !combined.find(l => l.id === item.id)) {
           combined.push(item);
         }
       });
 
       combined.sort((a,b) => {
-        const timeA = new Date(a.updatedAt || 0).getTime();
-        const timeB = new Date(b.updatedAt || 0).getTime();
+        const timeA = new Date(a.updatedAt || a.createdAt || 0).getTime();
+        const timeB = new Date(b.updatedAt || b.createdAt || 0).getTime();
         return timeB - timeA;
       });
       
@@ -103,7 +110,15 @@ export default function PublicTracking() {
     const snapshot = await getDocs(q);
     
     if (!snapshot.empty) {
-      setSearchResult({ id: snapshot.docs[0].id, ...snapshot.docs[0].data() } as Goods);
+      const data = snapshot.docs[0].data() as Goods;
+      const itemTime = data.createdAt ? new Date(data.createdAt).getTime() : 0;
+      const cutoffTime = new Date('2026-05-20T00:00:00Z').getTime();
+
+      if (itemTime >= cutoffTime || String(snapshot.docs[0].id).startsWith('GOOD-PURCHASE')) {
+        setSearchResult({ id: snapshot.docs[0].id, ...data } as Goods);
+      } else {
+        setSearchResult(null);
+      }
     } else {
       setSearchResult(null);
     }
