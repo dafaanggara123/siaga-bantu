@@ -111,8 +111,13 @@ export default function App() {
     setWalletConnected(true);
     setShowWalletModal(false);
     
-    // Persist wallet to profile
+    // Persist wallet to profile and update local state for immediate reactivity
     if (user) {
+      setUser({
+        ...user,
+        walletAddress: address,
+        walletNetwork: network
+      });
       setDoc(doc(db, 'users', user.uid), { 
         walletAddress: address,
         walletNetwork: network
